@@ -1,0 +1,12 @@
+vkbottle>=4.0.0
+vk_api
+requests
+aiohttp
+beautifulsoup4
+dateparser
+python-dateutil
+lxml
+aiofiles
+pydantic>=2.0.0
+httpx>=0.24.0
+typing-extensions>=4.5.0

@@ -1,0 +1,506 @@
+{
+  "1116686506": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 20741917764,
+    "lost_total": 480362360322,
+    "received_total": 0,
+    "sent_total": 107848990000
+  },
+  "1039110251": {
+    "won": 11,
+    "lost": 10,
+    "won_total": 145057173264650126,
+    "lost_total": 132669261082145090,
+    "received_total": 3209941002416,
+    "sent_total": 5203033121300
+  },
+  "876190453": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 20629184543,
+    "lost_total": 85305808802,
+    "received_total": 9640139400,
+    "sent_total": 3000000000
+  },
+  "738733496": {
+    "won": 5,
+    "lost": 7,
+    "won_total": 216252543530580,
+    "lost_total": 301324239047647,
+    "received_total": 1234131101200,
+    "sent_total": 363172312916
+  },
+  "870478120": {
+    "won": 0,
+    "lost": 1,
+    "won_total": 0,
+    "lost_total": 20000000000,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "1054352381": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 74294177454,
+    "lost_total": 285117023970,
+    "received_total": 0,
+    "sent_total": 6000000000
+  },
+  "846765918": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 749000000,
+    "sent_total": 0
+  },
+  "1112463478": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 730000000,
+    "sent_total": 0
+  },
+  "1116418383": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 146570,
+    "lost_total": 331590,
+    "received_total": 22549676767,
+    "sent_total": 730000
+  },
+  "856094618": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 12740500000,
+    "sent_total": 0
+  },
+  "887181187": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 2334199432,
+    "lost_total": 145168618469,
+    "received_total": 192050013498,
+    "sent_total": 0
+  },
+  "1030217520": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 102000600000,
+    "lost_total": 328340498009,
+    "received_total": 177072312916,
+    "sent_total": 146475300000
+  },
+  "1057582573": {
+    "won": 5,
+    "lost": 4,
+    "won_total": 1167933968864,
+    "lost_total": 1465462208437,
+    "received_total": 0,
+    "sent_total": 208989013498
+  },
+  "704582542": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 4727494084553,
+    "lost_total": 4000000,
+    "received_total": 4000010000000,
+    "sent_total": 0
+  },
+  "821265019": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 452148657586,
+    "lost_total": 578573296715,
+    "received_total": 8065000100,
+    "sent_total": 3620000000
+  },
+  "480007024": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 35000000,
+    "sent_total": 0
+  },
+  "1109323276": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 1111001000,
+    "lost_total": 10000000,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "669844825": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 2620922692,
+    "lost_total": 3242126111,
+    "received_total": 1049000000,
+    "sent_total": 0
+  },
+  "624886446": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 777777777,
+    "lost_total": 0,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "1055952106": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 24347323043,
+    "lost_total": 14257546086,
+    "received_total": 4100000000,
+    "sent_total": 100000
+  },
+  "487651590": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 220000006000,
+    "lost_total": 570000004000,
+    "received_total": 0,
+    "sent_total": 5000000000
+  },
+  "578018185": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 350000000,
+    "sent_total": 0
+  },
+  "874660854": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 9100000000,
+    "lost_total": 26000000000,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "883871795": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 0,
+    "sent_total": 50000000
+  },
+  "266755241": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 39000000000,
+    "sent_total": 0
+  },
+  "1109897608": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 19712000,
+    "lost_total": 225939090,
+    "received_total": 2210000000,
+    "sent_total": 40000
+  },
+  "1055396575": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 33050318000,
+    "sent_total": 160485463823
+  },
+  "1081623506": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 100000000000,
+    "sent_total": 0
+  },
+  "894239748": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 40000,
+    "lost_total": 0,
+    "received_total": 2940000000,
+    "sent_total": 0
+  },
+  "287744556": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 11989015275,
+    "lost_total": 8284182132,
+    "received_total": 65000000,
+    "sent_total": 0
+  },
+  "1098719458": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 71491661139,
+    "lost_total": 349738515834,
+    "received_total": 29000000,
+    "sent_total": 96411992416
+  },
+  "672052315": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 10000000000,
+    "sent_total": 0
+  },
+  "1049288116": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 1045660000,
+    "sent_total": 30250000000
+  },
+  "827451875": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 29645000000,
+    "sent_total": 1067000000
+  },
+  "1074155871": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 1010000,
+    "lost_total": 122000,
+    "received_total": 60163128507,
+    "sent_total": 44360210000
+  },
+  "1123894044": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 261600,
+    "lost_total": 110000,
+    "received_total": 55142110000,
+    "sent_total": 8073593934
+  },
+  "200002209931": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 161240033600,
+    "lost_total": 186833420009,
+    "received_total": 92000300000,
+    "sent_total": 92005011000
+  },
+  "1031865028": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 6400,
+    "lost_total": 210088,
+    "received_total": 10780,
+    "sent_total": 0
+  },
+  "641489087": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 48247200,
+    "lost_total": 70547000,
+    "received_total": 2590000000,
+    "sent_total": 0
+  },
+  "630281586": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 2904000,
+    "lost_total": 350000,
+    "received_total": 10000000000,
+    "sent_total": 0
+  },
+  "1113927037": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 856000,
+    "lost_total": 1197000,
+    "received_total": 43080787056,
+    "sent_total": 130000
+  },
+  "1069626504": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 244977948718,
+    "lost_total": 343524023136,
+    "received_total": 78400000000,
+    "sent_total": 95220000000
+  },
+  "675229002": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 24000,
+    "lost_total": 30000,
+    "received_total": 196000000,
+    "sent_total": 100000
+  },
+  "840227132": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 98000,
+    "sent_total": 0
+  },
+  "1073026179": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 19600,
+    "sent_total": 0
+  },
+  "819717314": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 2016806205,
+    "lost_total": 3121015024,
+    "received_total": 1110000000,
+    "sent_total": 0
+  },
+  "579910380": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 1000000000,
+    "sent_total": 0
+  },
+  "1052431812": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 1000000,
+    "sent_total": 0
+  },
+  "819742305": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 1391188635583,
+    "lost_total": 1466954052958,
+    "received_total": 100000000,
+    "sent_total": 67323232323
+  },
+  "1125534983": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 4003543,
+    "lost_total": 11005899,
+    "received_total": 53900000,
+    "sent_total": 0
+  },
+  "1128552516": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 49000000,
+    "sent_total": 0
+  },
+  "746014650": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 100000000000,
+    "sent_total": 0
+  },
+  "488828183": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 16012038913759,
+    "lost_total": 420618227252,
+    "received_total": 1226771791,
+    "sent_total": 0
+  },
+  "597064735": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 30000,
+    "lost_total": 10000,
+    "received_total": 0,
+    "sent_total": 1226771791
+  },
+  "846927796": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 24000,
+    "lost_total": 30000,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "888274461": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 32889004000,
+    "lost_total": 62730545000,
+    "received_total": 34443330323,
+    "sent_total": 0
+  },
+  "761431981": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 1009800,
+    "sent_total": 0
+  },
+  "845506997": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 40000000,
+    "sent_total": 0
+  },
+  "1027355301": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 749003547,
+    "sent_total": 0
+  },
+  "709430868": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 118000000,
+    "sent_total": 0
+  },
+  "1115917095": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 1000,
+    "received_total": 0,
+    "sent_total": 0
+  },
+  "1062211087": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 0,
+    "lost_total": 0,
+    "received_total": 950000000,
+    "sent_total": 0
+  },
+  "754619325": {
+    "won": 0,
+    "lost": 0,
+    "won_total": 230182975495,
+    "lost_total": 651108700540,
+    "received_total": 0,
+    "sent_total": 0
+  }
+}

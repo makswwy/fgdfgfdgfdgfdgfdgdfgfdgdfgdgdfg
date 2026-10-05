@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""
-Запускател для двух ботов (manager.py и game.py)
-Запускает оба бота одновременно
-"""
+
 
 import sys
 import os
 import asyncio
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 
 def install_dependencies():
@@ -18,20 +16,22 @@ def install_dependencies():
         import vkbottle
         import vk_api
         import aiohttp
+        import asyncpg
         print("All dependencies OK!")
         return True
-    except ImportError:
-        print("Installing dependencies...")
+    except ImportError as e:
+        missing = str(e.name) if hasattr(e, 'name') else 'unknown'
+        print(f"Installing missing dependency: {missing}...")
         try:
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                "vkbottle", "vk_api", "aiohttp", "beautifulsoup4", "dateparser", "requests"
+                "vkbottle", "vk_api", "aiohttp", "asyncpg", "beautifulsoup4", "dateparser", "requests"
             ])
             print("Dependencies installed!")
             return True
-        except Exception as e:
-            print(f"ERROR: {e}")
-            print("Install manually: pip install vkbottle vk_api aiohttp beautifulsoup4 dateparser requests")
+        except Exception as pip_e:
+            print(f"ERROR: {pip_e}")
+            print(f"Install manually: pip install vkbottle vk_api aiohttp asyncpg beautifulsoup4 dateparser requests")
             return False
 
 
@@ -64,11 +64,21 @@ async def run_bots_concurrently():
     print("=" * 60)
     
     # Проверяем файлы
-    required_files = ["manager.py", "game.py", "database1.db"]
+    required_files = ["manager.py", "game.py", "db.py"]
     missing_files = [f for f in required_files if not os.path.exists(f)]
     
     if missing_files:
         print(f"Missing files: {', '.join(missing_files)}")
+        return
+    
+    # Инициализируем PostgreSQL пул
+    print("Initializing PostgreSQL connection...")
+    try:
+        import db
+        await db.init_pool()
+        print("PostgreSQL connected successfully!")
+    except Exception as e:
+        print(f"ERROR: Failed to connect to PostgreSQL: {e}")
         return
     
     # Запускаем оба бота
@@ -83,9 +93,7 @@ async def run_bots_concurrently():
             )
         except KeyboardInterrupt:
             print("\nStopping bots...")
-
-
-from concurrent.futures import ThreadPoolExecutor
+            await db.close_pool()
 
 
 def main():

@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 from vkbottle.exception_factory import VKAPIError
 import os, re
 import re
@@ -14,11 +18,11 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, date, timezone
 from vkbottle import API
 from vkbottle.bot import Bot, Message, rules
-from typing import Optional
+from typing import Optional, Dict
 from vkbottle import Keyboard, Callback, CtxStorage, KeyboardButtonColor, Text, GroupEventType, GroupTypes, User, \
     VKAPIError
 import json
-import sqlite3
+import db
 import locale
 import dateparser
 
@@ -59,7 +63,6 @@ SUBS_FILE = "SUBS_FILE.json"
 
 # Импортируем данные об игровой экономике из game.py
 from game import HOUSES_DATA, CARS_DATA, BUSINESS_TYPES
-
 
 def format_duration_text(duration_minutes: int) -> str:
     """
@@ -126,7 +129,6 @@ def format_duration_text(duration_minutes: int) -> str:
     else:
         return " ".join(parts[:2])  # Показываем максимум 2 единицы
 
-
 def load_data(file):
     if os.path.exists(file):
         try:
@@ -136,13 +138,11 @@ def load_data(file):
             return {}
     return {}
 
-
 # ========== НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С СООБЩЕСТВАМИ ==========
 
 async def is_bot(user_id: int) -> bool:
     """Проверить, является ли пользователь ботом (сообществом)"""
     return user_id == BOT_ID or user_id < 0 and abs(user_id) == abs(BOT_ID)
-
 
 async def get_group_name(group_id: int) -> str:
     """Получить название сообщества по его ID"""
@@ -165,14 +165,12 @@ async def get_group_name(group_id: int) -> str:
         print(f"Ошибка получения названия сообщества {group_id}: {e}")
         return f"ID{abs(group_id)}"
 
-
 async def get_user_or_group_name(user_id: int) -> str:
     """Универсальная функция получения имени (пользователь или сообщество)"""
     if user_id < 0:
         return await get_group_name(user_id)
     else:
         return await get_user_name(user_id)
-
 
 async def get_user_or_group_mention(user_id: int, chat_id: int = None) -> str:
     """Универсальная функция получения упоминания (пользователь или сообщество)"""
@@ -189,7 +187,6 @@ async def get_user_or_group_mention(user_id: int, chat_id: int = None) -> str:
         user_name = await get_user_name(user_id)
         return f"[id{user_id}|{user_name}]"
 
-
 def format_vk_link(user_id: int, name: str) -> str:
     """Форматирует ссылку на пользователя VK"""
     safe_name = str(name).replace("|", " ").replace("]", ")").replace("\n", " ").replace("\r", " ")
@@ -198,12 +195,10 @@ def format_vk_link(user_id: int, name: str) -> str:
     else:
         return f"[id{user_id}|{safe_name}]"
 
-
 async def get_chat_owner_display(chat_id: int) -> str:
     """Получить владельца чата с красивым отображением"""
     try:
-        sql.execute("SELECT owner_id FROM chats WHERE chat_id = ?", (chat_id,))
-        owner_id_result = sql.fetchone()
+        owner_id_result = await db.fetchone('SELECT owner_id FROM chats WHERE chat_id = $1', chat_id,)
         
         if not owner_id_result:
             return "Неизвестно"
@@ -233,8 +228,7 @@ async def get_chat_owner_display(chat_id: int) -> str:
         owner_name = await get_user_name(owner_id)
         
         # Проверяем глобальную роль владельца
-        sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (owner_id,))
-        global_role = sql.fetchone()
+        global_role = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', owner_id,)
         
         if global_role and global_role[0] >= 9:
             return f"[id{owner_id}|Владелец беседы (Global Manager)]"
@@ -243,7 +237,6 @@ async def get_chat_owner_display(chat_id: int) -> str:
     except Exception as e:
         print(f"Ошибка в get_chat_owner_display: {e}")
         return "Неизвестно"
-
 
 # ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 
@@ -290,11 +283,9 @@ async def getID(arg: str):
     except:
         return False
 
-
 async def is_user_muted(user_id=int, chat_id=int):
     """Быстрая проверка, есть ли у пользователя активный мут"""
-    sql.execute(f"SELECT * FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT * FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
 
     if not fetch:
         return False
@@ -312,13 +303,12 @@ async def is_user_muted(user_id=int, chat_id=int):
 
     if current_time > expire_time:
         # Мут истек - удаляем
-        sql.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
+        pass
         await apply_system_mute(chat_id, user_id, unmute=True)
         return False
 
     return True
-
 
 async def get_registration_date(user_id):
     try:
@@ -355,28 +345,18 @@ async def get_registration_date(user_id):
         print(f"Неизвестная ошибка: {e}")
         return None
 
-
 def get_string(words_list, start_index=0):
     result = " ".join(words_list[start_index:])
     return result if result else False
 
-
-database = sqlite3.connect('database1.db')
-sql = database.cursor()
-
-try:
-    sql.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, moderator_id BIGINT, reason TEXT, datetime TEXT)")
-    database.commit()
-except:
-    pass
-
+# Database connection via db.py (PostgreSQL)
+# blacklist table created automatically by db.py
 
 async def topsms(chat_id):
     try:
         # Получаем всех пользователей и считаем количество их сообщений
         query = f"SELECT user_id, COUNT(*) as msg_count FROM messages_{chat_id} GROUP BY user_id ORDER BY msg_count DESC LIMIT 10"
-        sql.execute(query)
-        top_users = sql.fetchall()
+        top_users = await db.fetchall(query)
 
         if not top_users:
             return "В этой беседе пока нет сообщений!"
@@ -392,68 +372,65 @@ async def topsms(chat_id):
         print(f"Ошибка в topsms: {e}")
         return "Не удалось получить статистику сообщений"
 
-
 async def check_chat(chat_id=int):
-    sql.execute(f"SELECT * FROM chats WHERE chat_id = {chat_id}")
-    if sql.fetchone() == None:
+    result = await db.fetchone(f"SELECT * FROM chats WHERE chat_id = {chat_id}")
+    if result == None:
         return False
     else:
         return True
 
-
 async def chats_log(user_id=None, target_id=None, role=None, log=None):
     try:
-        sql.execute(
-            "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+        await db.execute(
+            "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
             (user_id, target_id, role, log)
         )
-        database.commit()
+        pass
     except Exception as e:
         print(f"")
 
-
 async def new_chat(chat_id=int, peer_id=int, owner_id=int):
-    sql.execute(f"INSERT INTO chats VALUES (?, ?, ?, '', 0, 0, 0, 0, 0, 0, 0, 0);", (chat_id, peer_id, owner_id))
-    sql.execute(f"CREATE TABLE IF NOT EXISTS permissions_{chat_id} (user_id BIGINT, level BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS balance (user_id BIGINT, money BIGINT, blago BIGINT, bank BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS staffbot (user_id BIGINT, level BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS ruk (user_id BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS logsrole (user BIGINT, role BIGINT, chat_id BIfGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS economy (user_id INTEGER, target_id INTEGER, amount INTEGER, log TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS logchats (user_id INTEGER, target_id INTEGER, role INTEGER, log TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS rules (chat_id BIGINT, text Text);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS info (chat_id BIGINT, text Text);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS banschats (chat_id BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS photosettings (chat_id BIGINT NOT NULL PRIMARY KEY,mode INT NOT NULL);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS usprom (user_id BIGINT, promo TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS vip (user_id BIGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS nicks_{chat_id} (user_id BIGINT, nick TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS promo (promo TEXT, status TEXT, vip BIGINT, money BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS banwords_{chat_id} (banword TEXT);")
-    sql.execute(
+    await db.execute(f"INSERT INTO chats VALUES ($1, $2, $3, '', 0, 0, 0, 0, 0, 0, 0, 0);", (chat_id, peer_id, owner_id))
+    await db.execute(f"CREATE TABLE IF NOT EXISTS permissions_{chat_id} (user_id BIGINT, level BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS balance (user_id BIGINT, money BIGINT, blago BIGINT, bank BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS staffbot (user_id BIGINT, level BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS ruk (user_id BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS logsrole (user BIGINT, role BIGINT, chat_id BIfGINT, date_string TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS economy (user_id INTEGER, target_id INTEGER, amount INTEGER, log TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS logchats (user_id INTEGER, target_id INTEGER, role INTEGER, log TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS rules (chat_id BIGINT, text Text);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS info (chat_id BIGINT, text Text);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS banschats (chat_id BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS photosettings (chat_id BIGINT NOT NULL PRIMARY KEY,mode INT NOT NULL);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS usprom (user_id BIGINT, promo TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS vip (user_id BIGINT, date_string TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS nicks_{chat_id} (user_id BIGINT, nick TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS promo (promo TEXT, status TEXT, vip BIGINT, money BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS banwords_{chat_id} (banword TEXT);")
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS warns_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS vig_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS mutes_{chat_id} (user_id BIGINT, moder TEXT, reason TEXT, date BIGINT, date_string TEXT, time BIGINT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS bans_{chat_id} (user_id BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS gbans (user_id BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS messages_{chat_id} (user_id BIGINT, date BIGINT, date_string TEXT, message_id BIGINT, cmid BIGINT);")
-    sql.execute(
+    await db.execute(
         f'CREATE TABLE IF NOT EXISTS users (user_id BIGINT, last_bonus TIMESTAMP DEFAULT NULL);')
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS warnhistory_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS vighistory_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS punishments_{chat_id} (user_id BIGINT, date TEXT);")
-    sql.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, moderator_id BIGINT, reason TEXT, datetime TEXT);")
-    sql.execute(
+    await db.execute(f"CREATE TABLE IF NOT EXISTS punishments_{chat_id} (user_id BIGINT, date TEXT);")
+    await db.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, moderator_id BIGINT, reason TEXT, datetime TEXT);")
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS jobs (user_id BIGINT PRIMARY KEY, job_id INTEGER, skill INTEGER, last_work_time TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS user_skills (user_id BIGINT PRIMARY KEY, skill INTEGER);")
-    sql.execute("CREATE TABLE IF NOT EXISTS clans ("
+    await db.execute(f"CREATE TABLE IF NOT EXISTS user_skills (user_id BIGINT PRIMARY KEY, skill INTEGER);")
+    await db.execute("CREATE TABLE IF NOT EXISTS clans ("
                 "clan_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "name TEXT UNIQUE, "
                 "tag TEXT UNIQUE, "
@@ -466,7 +443,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "losses INTEGER DEFAULT 0, "
                 "created_date TEXT)")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_members ("
+    await db.execute("CREATE TABLE IF NOT EXISTS clan_members ("
                 "user_id BIGINT PRIMARY KEY, "
                 "clan_id INTEGER, "
                 "role TEXT DEFAULT 'member', "  # leader, deputy, member
@@ -474,7 +451,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "donated BIGINT DEFAULT 0, "
                 "FOREIGN KEY(clan_id) REFERENCES clans(clan_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_wars ("
+    await db.execute("CREATE TABLE IF NOT EXISTS clan_wars ("
                 "war_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "clan1_id INTEGER, "
                 "clan2_id INTEGER, "
@@ -488,7 +465,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "FOREIGN KEY(clan1_id) REFERENCES clans(clan_id), "
                 "FOREIGN KEY(clan2_id) REFERENCES clans(clan_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_invites ("
+    await db.execute("CREATE TABLE IF NOT EXISTS clan_invites ("
                 "invite_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "clan_id INTEGER, "
                 "user_id BIGINT, "
@@ -496,7 +473,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "date TEXT, "
                 "FOREIGN KEY(clan_id) REFERENCES clans(clan_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_battles ("
+    await db.execute("CREATE TABLE IF NOT EXISTS clan_battles ("
                 "battle_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "war_id INTEGER, "
                 "user1_id BIGINT, "
@@ -505,9 +482,9 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "bet BIGINT, "
                 "status TEXT DEFAULT 'pending', "
                 "FOREIGN KEY(war_id) REFERENCES clan_wars(war_id))")
-    sql.execute(
+    await db.execute(
         "CREATE TABLE IF NOT EXISTS jobs (user_id BIGINT PRIMARY KEY, job_id INTEGER, skill INTEGER DEFAULT 0, last_work_time TEXT)")
-    sql.execute("CREATE TABLE IF NOT EXISTS business_types ("
+    await db.execute("CREATE TABLE IF NOT EXISTS business_types ("
                 "biz_id INTEGER PRIMARY KEY, "
                 "name TEXT, "
                 "emoji TEXT, "
@@ -516,7 +493,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "max_profit BIGINT, "
                 "description TEXT)")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS user_businesses ("
+    await db.execute("CREATE TABLE IF NOT EXISTS user_businesses ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user_id BIGINT, "
                 "biz_id INTEGER, "
@@ -526,12 +503,10 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "FOREIGN KEY(biz_id) REFERENCES business_types(biz_id), "
                 "UNIQUE(user_id, biz_id))")
 
-    database.commit()
-
+    pass
 
 # Словарь для хранения замьюченных пользователей в памяти
 muted_users_cache = {}  # Формат: {f"{chat_id}_{user_id}": {"expire_time": timestamp, "moder": id, "reason": reason}}
-
 
 # Исправленная функция apply_system_mute - теперь НЕ кикает пользователя!
 async def apply_system_mute(chat_id: int, user_id: int, duration_minutes: int = None, unmute: bool = False):
@@ -553,7 +528,6 @@ async def apply_system_mute(chat_id: int, user_id: int, duration_minutes: int = 
     except Exception as e:
         print(f"Неизвестная ошибка в apply_system_mute: {e}")
         return {"success": False, "message": f"❌ Неизвестная ошибка: {e}"}
-
 
 # Исправленная функция mute
 async def mute(user_id=int, chat_id=int, moder=int, reason=str, mute_time=int):
@@ -585,25 +559,25 @@ async def mute(user_id=int, chat_id=int, moder=int, reason=str, mute_time=int):
 
     # Удаляем старую запись если есть
     try:
-        sql.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
+        await db.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
     except:
         pass
 
     # Создаем новую запись
     try:
         # Пробуем вставить с expire_time
-        sql.execute(
-            f"INSERT INTO mutes_{chat_id} (user_id, moder, reason, date, date_string, time, expire_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        await db.execute(
+            f"INSERT INTO mutes_{chat_id} (user_id, moder, reason, date, date_string, time, expire_time) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             (user_id, moder, reason, current_timestamp, date_string, mute_time, expire_time)
         )
-    except sqlite3.OperationalError:
+    except Exception:
         # Если нет колонки expire_time, вставляем без неё
-        sql.execute(
-            f"INSERT INTO mutes_{chat_id} (user_id, moder, reason, date, date_string, time) VALUES (?, ?, ?, ?, ?, ?)",
+        await db.execute(
+            f"INSERT INTO mutes_{chat_id} (user_id, moder, reason, date, date_string, time) VALUES ($1, $2, $3, $4, $5, $6)",
             (user_id, moder, reason, current_timestamp, date_string, mute_time)
         )
 
-    database.commit()
+    pass
 
     return {
         "success": True,
@@ -616,7 +590,6 @@ async def mute(user_id=int, chat_id=int, moder=int, reason=str, mute_time=int):
         "expire_time": expire_time
     }
 
-
 # Функция для проверки мута (быстрая, с кэшем)
 async def is_muted(user_id=int, chat_id=int):
     """Быстрая проверка, есть ли у пользователя активный мут"""
@@ -624,11 +597,11 @@ async def is_muted(user_id=int, chat_id=int):
 
     # Игровой мут мафии хранится отдельно и управляется игровым ботом.
     try:
-        sql.execute("CREATE TABLE IF NOT EXISTS mafia_mutes (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (chat_id, user_id))")
-        sql.execute("SELECT 1 FROM mafia_mutes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
-        if sql.fetchone():
+        await db.execute("CREATE TABLE IF NOT EXISTS mafia_mutes (chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (chat_id, user_id))")
+        if await db.fetchone("SELECT 1 FROM mafia_mutes WHERE chat_id = $1 AND user_id = $2", (chat_id, user_id)):
+
             return True
-    except sqlite3.Error:
+    except Exception:
         pass
 
     # Проверяем в кэше
@@ -646,8 +619,7 @@ async def is_muted(user_id=int, chat_id=int):
 
     # Если нет в кэше, проверяем в БД
     try:
-        sql.execute(f"SELECT * FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
-        mute_data = sql.fetchone()
+        mute_data = await db.fetchone(f"SELECT * FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
 
         if mute_data:
             mute_time = mute_data[5]  # время в минутах
@@ -687,7 +659,6 @@ async def is_muted(user_id=int, chat_id=int):
 
     return False
 
-
 # Исправленная функция unmute
 async def unmute(user_id=int, chat_id=int, auto=False):
     """
@@ -701,19 +672,18 @@ async def unmute(user_id=int, chat_id=int, auto=False):
 
     # Удаляем из БД
     try:
-        sql.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute(f"DELETE FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
+        pass
     except:
         pass
 
     return {"success": True, "auto": auto}
 
-
 # Исправленная функция get_mute
 async def get_mute(user_id=int, chat_id=int):
     """Получить информацию о муте из БД"""
-    sql.execute(f"SELECT * FROM mutes_{chat_id} WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT * FROM mutes_{chat_id} WHERE user_id = $1", (user_id,))
+
     if fetch == None:
         return False
     else:
@@ -734,11 +704,10 @@ async def get_mute(user_id=int, chat_id=int):
             'expire_time': expire_time
         }
 
-
 # Исправленная функция mutelist
 async def mutelist(chat_id=int):
-    sql.execute(f"SELECT * FROM mutes_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM mutes_{chat_id}")
+
     mutes = []
     if fetch == None or len(fetch) == 0:
         return False
@@ -763,7 +732,6 @@ async def mutelist(chat_id=int):
             mutes.append(f"{user_display} | {i[2]} | {moder_display} | До: {time_text}")
     return mutes
 
-
 # Функция для очистки истекших мутов
 async def cleanup_mutes():
     """Периодически проверяет и удаляет истекшие муты"""
@@ -785,15 +753,13 @@ async def cleanup_mutes():
 
             # Проверяем БД
             try:
-                sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mutes_%'")
-                tables = sql.fetchall()
+                tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'mutes_%'")
 
                 for table in tables:
                     table_name = table[0]
                     chat_id = int(table_name.replace('mutes_', ''))
 
-                    sql.execute(f"SELECT user_id, date, time FROM {table_name}")
-                    rows = sql.fetchall()
+                    rows = await db.fetchall(f"SELECT user_id, date, time FROM {table_name}")
 
                     for row in rows:
                         user_id, mute_start, duration = row
@@ -811,64 +777,78 @@ async def cleanup_mutes():
             print(f"Ошибка в cleanup_mutes: {e}")
             await asyncio.sleep(60)
 
-
 # Функция для обновления таблиц мутов
 async def update_mutes_tables():
     """Обновляет таблицы мутов, добавляя колонку expire_time"""
     try:
-        sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mutes_%'")
-        tables = sql.fetchall()
+        tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'mutes_%'")
 
         for table in tables:
             table_name = table[0]
 
             # Проверяем наличие колонки expire_time
-            sql.execute(f"PRAGMA table_info({table_name})")
-            columns = sql.fetchall()
+            columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
             column_names = [col[1] for col in columns]
 
             if 'expire_time' not in column_names:
                 try:
-                    sql.execute(f"ALTER TABLE {table_name} ADD COLUMN expire_time REAL")
-                    database.commit()
+                    await db.execute(f"ALTER TABLE {table_name} ADD COLUMN expire_time REAL")
+                    pass
                     print(f"Добавлена колонка expire_time в {table_name}")
                 except Exception as e:
                     print(f"Ошибка при обновлении {table_name}: {e}")
     except Exception as e:
         print(f"Ошибка в update_mutes_tables: {e}")
 
+# Кэш для ролей пользователей (user_id, chat_id) -> role
+_role_cache: Dict[tuple, tuple] = {}
+_ROLE_CACHE_TTL = 10  # секунды
 
-async def get_role(user_id=int, chat_id=int):
+
+async def get_role_cached(user_id, chat_id):
+    """Получить роль с кэшированием"""
+    key = (user_id, chat_id)
+    now = time.time()
+    
+    if key in _role_cache:
+        role, timestamp = _role_cache[key]
+        if now - timestamp < _ROLE_CACHE_TTL:
+            return role
+    
+    role = await get_role_cached(user_id, chat_id)
+    _role_cache[key] = (role, now)
+    return role
+
+
+async def get_role_cached(user_id=int, chat_id=int):
     user_id = int(user_id)
     chat_id = int(chat_id)
 
     # Таблица локальных прав может отсутствовать в новом/ещё не инициализированном чате.
     # Создаём её до любого SELECT, чтобы обработчик сообщения не падал.
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS permissions_{chat_id} ("
         "user_id BIGINT, level BIGINT)"
     )
-    database.commit()
+    pass
 
     # ПРОВЕРЯЕМ ГЛОБАЛЬНУЮ РОЛЬ ПЕРВОЙ И С ПРИОРИТЕТОМ
-    sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', user_id,)
     if fetch and fetch[0] is not None and fetch[0] > 0:
         print(f"DEBUG get_role: user={user_id}, chat={chat_id} -> GLOBAL ROLE = {fetch[0]}")
         return fetch[0]
 
     # Если глобальной роли нет, проверяем локальную.
-    sql.execute("SELECT owner_id FROM chats WHERE chat_id = ?", (chat_id,))
-    chat_owner = sql.fetchone()
+    chat_owner = await db.fetchone('SELECT owner_id FROM chats WHERE chat_id = $1', chat_id,)
     if chat_owner and chat_owner[0] == user_id:
         print(f"DEBUG get_role: user={user_id}, chat={chat_id} -> OWNER ROLE = 7")
         return 7
 
-    sql.execute(
-        f"SELECT level FROM permissions_{chat_id} WHERE user_id = ?",
+    fetch = await db.fetchone(
+        f"SELECT level FROM permissions_{chat_id} WHERE user_id = $1",
         (user_id,),
     )
-    fetch = sql.fetchone()
     if fetch is None or fetch[0] is None:
         print(f"DEBUG get_role: user={user_id}, chat={chat_id} -> NO ROLE = 0")
         return 0
@@ -876,48 +856,43 @@ async def get_role(user_id=int, chat_id=int):
     print(f"DEBUG get_role: user={user_id}, chat={chat_id} -> LOCAL ROLE = {fetch[0]}")
     return fetch[0]
 
-
 async def ensure_column_exists(table_name, column_name, column_type="INTEGER"):
-    sql.execute(f"PRAGMA table_info({table_name})")
-    columns = sql.fetchall()
+    columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
     column_names = [col[1] for col in columns]
     if column_name not in column_names:
         print(f"Колонка '{column_name}' не найдена в таблице '{table_name}'. Создаем...")
         try:
-            sql.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
             print(f"Колонка '{column_name}' успешно создана.")
-            database.commit()
+            pass
         except sqlite3.OperationalError as e:
             print(f"Ошибка при создании колонки '{column_name}': {e}")
             database.rollback()
     else:
         print(f"Колонка '{column_name}' уже существует в таблице '{table_name}'. Ничего не делаем.")
 
-
 async def ensure_column_delete(table_name=str):
     print(1, table_name)
-    sql.execute(f"DELETE FROM promo WHERE promo = ?", (table_name,))
+    await db.execute(f"DELETE FROM promo WHERE promo = $1", (table_name,))
     print(f"Колонка '{table_name}' успешно удалена.")
-    database.commit()
-
+    pass
 
 async def get_warns(user_id=int, chat_id=int):
-    sql.execute(f"SELECT count FROM warns_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT count FROM warns_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         return 0
     else:
         return fetch[0]
-
 
 async def get_vig(user_id=int, chat_id=int):
-    sql.execute(f"SELECT count FROM vig_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT count FROM vig_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         return 0
     else:
         return fetch[0]
-
 
 async def get_user_name(user_id=int):
     try:
@@ -933,33 +908,27 @@ async def get_user_name(user_id=int):
         print(f"Ошибка получения имени пользователя {user_id}: {e}")
         return f"ID{user_id}"
 
-
 async def is_nick(user_id=int, chat_id=int):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    if sql.fetchone() == None:
+    if await db.fetchone(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}") == None:
         return False
     else:
         return True
 
-
 async def setnick(user_id=int, chat_id=int, new_nick=str):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    if sql.fetchone() == None:
-        sql.execute(f"INSERT INTO nicks_{chat_id} VALUES (?, ?)", (user_id, new_nick))
-        database.commit()
+    if await db.fetchone(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}") == None:
+        await db.execute(f"INSERT INTO nicks_{chat_id} VALUES ($1, $2)", (user_id, new_nick))
+        pass
     else:
-        sql.execute(f"UPDATE nicks_{chat_id} SET nick = ? WHERE user_id = ?", (new_nick, user_id))
-        database.commit()
-
+        await db.execute(f"UPDATE nicks_{chat_id} SET nick = $1 WHERE user_id = $2", (new_nick, user_id))
+        pass
 
 async def rnick(user_id=int, chat_id=int):
-    sql.execute(f"DELETE FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM nicks_{chat_id} WHERE user_id = {user_id}")
+    pass
 
 async def equals_roles(user_id_sender=int, user_id_two=int, chat_id=int):
-    role_sender = await get_role(user_id_sender, chat_id) or 0
-    role_two = await get_role(user_id_two, chat_id) or 0
+    role_sender = await get_role_cached(user_id_sender, chat_id) or 0
+    role_two = await get_role_cached(user_id_two, chat_id) or 0
     
     if role_sender > role_two:
         return 2
@@ -968,28 +937,25 @@ async def equals_roles(user_id_sender=int, user_id_two=int, chat_id=int):
     else:
         return 0
 
-
 async def get_acc(chat_id=int, nick=str):
-    sql.execute(f"SELECT user_id FROM nicks_{chat_id} WHERE nick = '{nick}'")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT user_id FROM nicks_{chat_id} WHERE nick = '{nick}'")
+
     if fetch == None:
         return False
     else:
         return fetch[0]
-
 
 async def get_nick(user_id=int, chat_id=int):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         return False
     else:
         return fetch[0]
 
-
 async def nlist(chat_id=int, page=int):
-    sql.execute(f"SELECT * FROM nicks_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM nicks_{chat_id}")
+
     nicks = []
     gi = 0
     with open("config2.json", "r") as json_file:
@@ -1004,10 +970,9 @@ async def nlist(chat_id=int, page=int):
             nicks.append(f'{gi}) {user_display} - {nick_data}')
     return nicks
 
-
 async def nonick(chat_id=int, page=int):
-    sql.execute(f"SELECT * FROM nicks_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM nicks_{chat_id}")
+
     nicks = []
     for i in fetch:
         nicks.append(i[0])
@@ -1026,82 +991,75 @@ async def nonick(chat_id=int, page=int):
                 nonick.append(f"{gi}) {user_display}")
     return nonick
 
-
 async def warn(chat_id=int, user_id=int, moder=int, reason=str):
     actualy_warns = await get_warns(user_id, chat_id)
     date = time.time()
     cd = str(moscow_now()).split('.')
     date_string = cd[0]
-    sql.execute(f"INSERT INTO warnhistory_{chat_id} VALUES (?, {actualy_warns + 1}, ?, ?, {date}, '{date_string}')",
+    await db.execute(f"INSERT INTO warnhistory_{chat_id} VALUES ($1, {actualy_warns + 1}, $2, $3, {date}, '{date_string}')",
                 (user_id, moder, reason))
-    database.commit()
+    pass
     if actualy_warns < 1:
-        sql.execute(f"INSERT INTO warns_{chat_id} VALUES (?, 1, ?, ?, {date}, '{date_string}')",
+        await db.execute(f"INSERT INTO warns_{chat_id} VALUES ($1, 1, $2, $3, {date}, '{date_string}')",
                     (user_id, moder, reason))
-        database.commit()
+        pass
         return 1
     else:
-        sql.execute(
-            f"UPDATE warns_{chat_id} SET user_id = ?, count = ?, moder = ?, reason = ?, date = {date}, date_string = '{date_string}' WHERE user_id = {user_id}",
+        await db.execute(
+            f"UPDATE warns_{chat_id} SET user_id = $1, count = $2, moder = $3, reason = $4, date = {date}, date_string = '{date_string}' WHERE user_id = {user_id}",
             (user_id, actualy_warns + 1, moder, reason))
-        database.commit()
+        pass
         return actualy_warns + 1
-
 
 async def vigs(chat_id=int, user_id=int, moder=int, reason=str):
     actualy_warns = await get_vig(user_id, chat_id)
     date = time.time()
     cd = str(moscow_now()).split('.')
     date_string = cd[0]
-    sql.execute(f"INSERT INTO vighistory_{chat_id} VALUES (?, {actualy_warns + 1}, ?, ?, {date}, '{date_string}')",
+    await db.execute(f"INSERT INTO vighistory_{chat_id} VALUES ($1, {actualy_warns + 1}, $2, $3, {date}, '{date_string}')",
                 (user_id, moder, reason))
-    database.commit()
+    pass
     if actualy_warns < 1:
-        sql.execute(f"INSERT INTO vig_{chat_id} VALUES (?, 1, ?, ?, {date}, '{date_string}')",
+        await db.execute(f"INSERT INTO vig_{chat_id} VALUES ($1, 1, $2, $3, {date}, '{date_string}')",
                     (user_id, moder, reason))
-        database.commit()
+        pass
         return 1
     else:
-        sql.execute(
-            f"UPDATE vig_{chat_id} SET user_id = ?, count = ?, moder = ?, reason = ?, date = {date}, date_string = '{date_string}' WHERE user_id = {user_id}",
+        await db.execute(
+            f"UPDATE vig_{chat_id} SET user_id = $1, count = $2, moder = $3, reason = $4, date = {date}, date_string = '{date_string}' WHERE user_id = {user_id}",
             (user_id, actualy_warns + 1, moder, reason))
-        database.commit()
+        pass
         return actualy_warns + 1
 
-
 async def clear_warns(chat_id=int, user_id=int):
-    sql.execute(f"DELETE FROM warns_{chat_id} WHERE user_id = {user_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM warns_{chat_id} WHERE user_id = {user_id}")
+    pass
 
 async def unwarn(chat_id=int, user_id=int):
     warns = await get_warns(user_id, chat_id)
     if warns < 2:
         await clear_warns(chat_id, user_id)
     else:
-        sql.execute(f"UPDATE warns_{chat_id} SET count = {warns - 1} WHERE user_id = {user_id}")
-        database.commit()
+        await db.execute(f"UPDATE warns_{chat_id} SET count = {warns - 1} WHERE user_id = {user_id}")
+        pass
     return warns - 1
 
-
 async def clear_vig(chat_id=int, user_id=int):
-    sql.execute(f"DELETE FROM vig_{chat_id} WHERE user_id = {user_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM vig_{chat_id} WHERE user_id = {user_id}")
+    pass
 
 async def unvig(chat_id=int, user_id=int):
     warns = await get_vig(user_id, chat_id)
     if warns < 2:
         await clear_vig(chat_id, user_id)
     else:
-        sql.execute(f"UPDATE vig_{chat_id} SET count = {warns - 1} WHERE user_id = {user_id}")
-        database.commit()
+        await db.execute(f"UPDATE vig_{chat_id} SET count = {warns - 1} WHERE user_id = {user_id}")
+        pass
     return warns - 1
 
-
 async def gvig(user_id=int, chat_id=int):
-    sql.execute(f"SELECT * FROM vig_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT * FROM vig_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         return False
     else:
@@ -1111,11 +1069,10 @@ async def gvig(user_id=int, chat_id=int):
             'reason': fetch[3],
             'time': fetch[5]
         }
-
 
 async def vighistory(user_id=int, chat_id=int):
-    sql.execute(f"SELECT * FROM vighistory_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM vighistory_{chat_id} WHERE user_id = {user_id}")
+
     warnhistory_mass = []
     gi = 0
     if fetch == None:
@@ -1127,10 +1084,9 @@ async def vighistory(user_id=int, chat_id=int):
             warnhistory_mass.append(f"{gi}) {moder_display} | {i[3]} | {i[5]}")
     return warnhistory_mass
 
-
 async def viglist(chat_id=int):
-    sql.execute(f"SELECT * FROM vig_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM vig_{chat_id}")
+
     warns = []
     gi = 0
     for i in fetch:
@@ -1141,10 +1097,9 @@ async def viglist(chat_id=int):
     if fetch == None: return False
     return warns
 
-
 async def gwarn(user_id=int, chat_id=int):
-    sql.execute(f"SELECT * FROM warns_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT * FROM warns_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         return False
     else:
@@ -1155,10 +1110,9 @@ async def gwarn(user_id=int, chat_id=int):
             'time': fetch[5]
         }
 
-
 async def warnhistory(user_id=int, chat_id=int):
-    sql.execute(f"SELECT * FROM warnhistory_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM warnhistory_{chat_id} WHERE user_id = {user_id}")
+
     warnhistory_mass = []
     gi = 0
     if fetch == None:
@@ -1170,10 +1124,9 @@ async def warnhistory(user_id=int, chat_id=int):
             warnhistory_mass.append(f"{gi}) {moder_display} | {i[3]} | {i[5]}")
     return warnhistory_mass
 
-
 async def warnlist(chat_id=int):
-    sql.execute(f"SELECT * FROM warns_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM warns_{chat_id}")
+
     warns = []
     gi = 0
     for i in fetch:
@@ -1183,7 +1136,6 @@ async def warnlist(chat_id=int):
         warns.append(f"{gi}) {user_display} | {i[3]} | {moder_display} | {i[1]}/3 | {i[5]}")
     if fetch == None: return False
     return warns
-
 
 async def globalrole(user_id: int, level: int):
     """
@@ -1196,25 +1148,23 @@ async def globalrole(user_id: int, level: int):
         10 - Специальный Руководитель
         11 - Разработчик
     """
-    sql.execute("SELECT user_id FROM global_managers WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT user_id FROM global_managers WHERE user_id = $1', user_id,)
 
     if fetch is None:
         if level != 0:
-            sql.execute("INSERT INTO global_managers (user_id, level) VALUES (?, ?)", (user_id, level))
+            await db.execute("INSERT INTO global_managers (user_id, level) VALUES ($1, $2)", (user_id, level))
     else:
         if level == 0:
-            sql.execute("DELETE FROM global_managers WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM global_managers WHERE user_id = $1", (user_id,))
         else:
-            sql.execute("UPDATE global_managers SET level = ? WHERE user_id = ?", (level, user_id))
+            await db.execute("UPDATE global_managers SET level = $1 WHERE user_id = $2", (level, user_id))
 
-    database.commit()
+    pass
     print(f"Глобальная роль пользователя {user_id} изменена на уровень {level}")
 
-
 async def staff(chat_id=int, owner_id=int):
-    sql.execute(f"SELECT * FROM permissions_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM permissions_{chat_id}")
+
     moders = []
     stmoders = []
     admins = []
@@ -1253,43 +1203,36 @@ async def staff(chat_id=int, owner_id=int):
         'owner': owner,
     }
 
-
 async def addruk(user_id=int):
-    sql.execute(f"INSERT INTO ruk VALUES (?)", (user_id,))
-    database.commit()
-
+    await db.execute(f"INSERT INTO ruk VALUES ($1)", (user_id,))
+    pass
 
 async def delruk(user_id=int):
-    sql.execute(f"DELETE FROM ruk WHERE user_id = {user_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM ruk WHERE user_id = {user_id}")
+    pass
 
 async def ruklist():
-    sql.execute(f"SELECT * FROM ruk")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM ruk")
+
     if fetch:
         ids_list = [item[0] for item in fetch]
         idstuple = tuple(ids_list)
         return ids_list
 
-
 async def check_quit(chat_id=int):
-    sql.execute(f"SELECT silence FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT silence FROM chats WHERE chat_id = {chat_id}")
+
     if fetch == None:
         return False
     else:
         return await get_logic(fetch[0])
 
-
 async def get_banwords(chat_id=int):
-    sql.execute(f"SELECT * FROM banwords_{chat_id}")
     banwords = []
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM banwords_{chat_id}")
     for i in fetch:
         banwords.append(i[0])
     return banwords
-
 
 async def clear(cmid=int, chat_id=int, group_id=int, peer_id=int):
     try:
@@ -1297,29 +1240,27 @@ async def clear(cmid=int, chat_id=int, group_id=int, peer_id=int):
     except:
         pass
 
-
 async def new_message(user_id=int, message_id=int, cmid=int, chat_id=int):
     cd = str(moscow_now()).split('.')
     date_string = cd[0]
-    sql.execute(f"INSERT INTO messages_{chat_id} VALUES (?, ?, ?, ?, ?)",
+    await db.execute(f"INSERT INTO messages_{chat_id} VALUES ($1, $2, $3, $4, $5)",
                 (user_id, time.time(), date_string, message_id, cmid))
-    database.commit()
-
+    pass
 
 async def roleG(user_id=int, chat_id=int, role=int):
-    sql.execute(f"SElECT user_id FROM permissions_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SElECT user_id FROM permissions_{chat_id} WHERE user_id = {user_id}")
+
     if fetch == None:
         if role == 0:
-            sql.execute(f"DELETE FROM permissions_{chat_id} WHERE user_id = {user_id}")
+            await db.execute(f"DELETE FROM permissions_{chat_id} WHERE user_id = {user_id}")
         else:
-            sql.execute(f"INSERT INTO permissions_{chat_id} VALUES (?, ?)", (user_id, role))
+            await db.execute(f"INSERT INTO permissions_{chat_id} VALUES ($1, $2)", (user_id, role))
     else:
         if role == 0:
-            sql.execute(f"DELETE FROM permissions_{chat_id} WHERE user_id = {user_id}")
+            await db.execute(f"DELETE FROM permissions_{chat_id} WHERE user_id = {user_id}")
         else:
-            sql.execute(f"UPDATE permissions_{chat_id} SET level = ? WHERE user_id = ?", (role, user_id))
-    database.commit()
+            await db.execute(f"UPDATE permissions_{chat_id} SET level = $1 WHERE user_id = $2", (role, user_id))
+    pass
 
     # Записываем дату назначения роли (только для ролей ≥ 1)
     if role >= 1:
@@ -1327,31 +1268,29 @@ async def roleG(user_id=int, chat_id=int, role=int):
     if role >= 8:
         await logsrole(user_id, role, chat_id)
 
-
 async def set_role_appointment_date(user_id=int, chat_id=int, role_level=int):
     """Установить/обновить дату назначения роли"""
     try:
         # Проверяем, есть ли уже запись
-        sql.execute(f"SELECT * FROM role_appointments WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-        existing = sql.fetchone()
+        existing = await db.fetchone(f"SELECT * FROM role_appointments WHERE user_id = $1 AND chat_id = $2", (user_id, chat_id))
 
         current_time = moscow_now().strftime('%Y-%m-%d')
 
         if existing:
             # Обновляем существующую запись
-            sql.execute("""
+            await db.execute("""
                 UPDATE role_appointments 
-                SET role_level = ?, appointment_date = ?
-                WHERE user_id = ? AND chat_id = ?
+                SET role_level = $1, appointment_date = $2
+                WHERE user_id = $3 AND chat_id = $4
             """, (role_level, current_time, user_id, chat_id))
         else:
             # Создаем новую запись
-            sql.execute("""
+            await db.execute("""
                 INSERT INTO role_appointments (user_id, chat_id, role_level, appointment_date)
                 VALUES (?, ?, ?, ?)
             """, (user_id, chat_id, role_level, current_time))
 
-        database.commit()
+        pass
         return True
     except sqlite3.OperationalError as e:
         if "no such table" in str(e):
@@ -1363,10 +1302,9 @@ async def set_role_appointment_date(user_id=int, chat_id=int, role_level=int):
             print(f"Ошибка при записи даты назначения: {e}")
             return False
 
-
 async def create_role_appointments_table():
     """Создать таблицу для хранения дат назначения ролей"""
-    sql.execute("""
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS role_appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id BIGINT NOT NULL,
@@ -1376,25 +1314,22 @@ async def create_role_appointments_table():
             UNIQUE(user_id, chat_id)
         )
     """)
-    database.commit()
-
+    pass
 
 async def logsrole(user=int, role=int, chat_id=int):
     cd = str(moscow_now()).split('.')
     date_string = cd[0]
-    sql.execute(f"INSERT INTO logsrole VALUES (?, ?, ?, ?)", (user, role, chat_id, date_string))
-    database.commit()
-
+    await db.execute(f"INSERT INTO logsrole VALUES ($1, $2, $3, $4)", (user, role, chat_id, date_string))
+    pass
 
 async def logsrolelist():
-    sql.execute(f"SELECT * FROM logsrole")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT * FROM logsrole")
+
     banlist = []
     for i in fetch:
         user_display = await get_user_or_group_mention(i[0])
         banlist.append(f"{user_display} | Выдан {i[1]} уровень прав | Дата: {i[3]} | {i[2]}")
     return banlist
-
 
 async def ban(user_id: int, moder: int, chat_id: int, reason: str, duration_minutes: int = 0,
               duration_text: str = "навсегда"):
@@ -1422,41 +1357,41 @@ async def ban(user_id: int, moder: int, chat_id: int, reason: str, duration_minu
     table_name = f"bans_{chat_id}"
 
     # ПРОВЕРЯЕМ И ДОБАВЛЯЕМ КОЛОНКИ ПЕРЕД ВСТАВКОЙ
-    sql.execute(f"PRAGMA table_info({table_name})")
-    columns = sql.fetchall()
+    columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
     column_names = [col[1] for col in columns]
 
     # Добавляем недостающие колонки
     if 'ban_time' not in column_names:
         print(f"Добавляем колонку ban_time в {table_name}")
-        sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_time INTEGER DEFAULT 0")
-        database.commit()
+        await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_time INTEGER DEFAULT 0")
+        pass
 
     if 'ban_expire' not in column_names:
         print(f"Добавляем колонку ban_expire в {table_name}")
-        sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_expire REAL DEFAULT 0")
-        database.commit()
+        await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_expire REAL DEFAULT 0")
+        pass
 
     if 'ban_duration_text' not in column_names:
         print(f"Добавляем колонку ban_duration_text в {table_name}")
-        sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_duration_text TEXT DEFAULT 'навсегда'")
-        database.commit()
+        await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_duration_text TEXT DEFAULT 'навсегда'")
+        pass
 
     # Удаляем старую запись если есть
-    sql.execute(f"DELETE FROM {table_name} WHERE user_id = ?", (user_id,))
+    await db.execute(f"DELETE FROM {table_name} WHERE user_id = $1", (user_id,))
 
     # Вставляем новую запись - УБЕДИТЕСЬ, ЧТО ВСЕ 8 КОЛОНОК НА МЕСТЕ
-    sql.execute(f"""
+    await db.execute(f"""
         INSERT INTO {table_name} 
         (user_id, moder, reason, date, date_string, ban_time, ban_expire, ban_duration_text) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (user_id, moder, reason, current_timestamp, date_string, duration_minutes, expire_time, duration_text))
 
-    database.commit()
+    pass
 
     # ПРОВЕРЯЕМ, ЧТО СОХРАНИЛОСЬ
-    sql.execute(f"SELECT ban_time, ban_expire, ban_duration_text FROM {table_name} WHERE user_id = ?", (user_id,))
-    check = sql.fetchone()
+    check = await db.fetchone(f"SELECT ban_time, ban_expire, ban_duration_text FROM {table_name} WHERE user_id = $1", (user_id,))
+
     if check:
         print(f"DEBUG ПРОВЕРКА: ban_time={check[0]}, ban_expire={check[1]}, ban_duration_text={check[2]}")
         if check[0] != duration_minutes:
@@ -1464,19 +1399,21 @@ async def ban(user_id: int, moder: int, chat_id: int, reason: str, duration_minu
     else:
         print(f"DEBUG ОШИБКА: данные не сохранились!")
 
-
 async def is_user_banned(user_id: int, chat_id: int) -> tuple:
     """Проверить, забанен ли пользователь, и не истёк ли бан"""
     try:
         table_name = f"bans_{chat_id}"
 
         # Проверяем, существует ли таблица
-        sql.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table_name,))
-        if not sql.fetchone():
+        exists = await db.fetchval(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
+            (table_name,)
+        )
+        if not exists:
+
             return (False, None)
 
-        sql.execute(f"SELECT * FROM {table_name} WHERE user_id = ?", (user_id,))
-        ban_data = sql.fetchone()
+        ban_data = await db.fetchone(f"SELECT * FROM {table_name} WHERE user_id = $1", (user_id,))
 
         if not ban_data:
             return (False, None)
@@ -1526,13 +1463,11 @@ async def is_user_banned(user_id: int, chat_id: int) -> tuple:
         traceback.print_exc()
         return (False, None)
 
-
 async def cleanup_expired_bans_on_start():
     """При запуске бота проверяет и снимает все истекшие баны"""
     print("🔄 Проверка истекших банов при запуске...")
 
-    sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bans_%'")
-    tables = sql.fetchall()
+    tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'bans_%'")
 
     current_time = time.time()
     removed_count = 0
@@ -1549,14 +1484,12 @@ async def cleanup_expired_bans_on_start():
             continue
 
         # Проверяем наличие колонки ban_expire
-        sql.execute(f"PRAGMA table_info({table_name})")
-        columns = sql.fetchall()
+        columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
         column_names = [col[1] for col in columns]
 
         if 'ban_expire' in column_names:
-            sql.execute(f"SELECT user_id, ban_expire FROM {table_name} WHERE ban_expire > 0 AND ban_expire <= ?",
-                        (current_time,))
-            expired_bans = sql.fetchall()
+            expired_bans = await db.fetchall(f"SELECT user_id, ban_expire FROM {table_name} WHERE ban_expire > 0 AND ban_expire <= $1", (current_time,))
 
             for expired in expired_bans:
                 user_id = expired[0]
@@ -1566,19 +1499,21 @@ async def cleanup_expired_bans_on_start():
 
     print(f"✅ Проверка завершена. Снято {removed_count} истекших банов.")
 
-
 async def checkban(user_id: int, chat_id: int):
     """Получить информацию о бане пользователя в чате"""
     try:
         table_name = f"bans_{chat_id}"
 
         # Проверяем, существует ли таблица
-        sql.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table_name,))
-        if not sql.fetchone():
+        exists = await db.fetchval(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
+            (table_name,)
+        )
+        if not exists:
+
             return False
 
-        sql.execute(f"SELECT * FROM {table_name} WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        fetch = await db.fetchone(f"SELECT * FROM {table_name} WHERE user_id = $1", (user_id,))
 
         if fetch is None:
             return False
@@ -1629,56 +1564,55 @@ async def checkban(user_id: int, chat_id: int):
         traceback.print_exc()
         return False
 
-
 async def unban(user_id: int, chat_id: int, admin_id: int = None, reason: str = None, auto: bool = False):
     """Снять бан (удалить из БД)"""
     try:
-        sql.execute(f"DELETE FROM bans_{chat_id} WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute(f"DELETE FROM bans_{chat_id} WHERE user_id = $1", (user_id,))
+        pass
         if auto:
             print(f"Автоматически снят бан у пользователя {user_id} в чате {chat_id}")
     except Exception as e:
         print(f"Ошибка при снятии бана: {e}")
 
-
 async def gban(user_id: int, moderator: int, chat_id: int, reason: str):
     """Глобальный бан пользователя"""
     try:
-        sql.execute("SELECT user_id FROM gbans WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        fetch = await db.fetchone('SELECT user_id FROM gbans WHERE user_id = $1', user_id,)
         cd = str(moscow_now()).split('.')
         date_string = cd[0]
 
         if fetch is None:
-            sql.execute("INSERT INTO gbans (user_id, moder, reason, date, date_string) VALUES (?, ?, ?, ?, ?)",
+            await db.execute("INSERT INTO gbans (user_id, moder, reason, date, date_string) VALUES ($1, $2, $3, $4, $5)",
                         (user_id, moderator, reason, time.time(), date_string))
         else:
-            sql.execute("UPDATE gbans SET moder = ?, reason = ?, date = ?, date_string = ? WHERE user_id = ?",
+            await db.execute("UPDATE gbans SET moder = $1, reason = $2, date = $3, date_string = $4 WHERE user_id = $5",
                         (moderator, reason, time.time(), date_string, user_id))
-        database.commit()
+        pass
     except Exception as e:
         print(f"Ошибка в gban: {e}")
-
 
 async def ungban(user_id: int, admin_id: int = None, reason: str = None):
     """Снять глобальный бан"""
     try:
-        sql.execute("DELETE FROM gbans WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute("DELETE FROM gbans WHERE user_id = $1", (user_id,))
+        pass
     except Exception as e:
         print(f"Ошибка в ungban: {e}")
-
 
 async def banlist(chat_id: int) -> list:
     """Получить список банов в чате"""
     try:
         # Проверяем, существует ли таблица для этого чата
-        sql.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name = 'bans_{chat_id}'")
-        if not sql.fetchone():
+        table_name = f"bans_{chat_id}"
+        exists = await db.fetchval(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)",
+            (table_name,)
+        )
+        if not exists:
+
             return ["📭 В этой беседе нет заблокированных пользователей!"]
 
-        sql.execute(f"SELECT * FROM bans_{chat_id} ORDER BY date DESC")
-        fetch = sql.fetchall()
+        fetch = await db.fetchall(f"SELECT * FROM bans_{chat_id} ORDER BY date DESC")
 
         if not fetch:
             return ["📭 В этой беседе нет заблокированных пользователей!"]
@@ -1719,12 +1653,10 @@ async def banlist(chat_id: int) -> list:
         print(f"Ошибка в banlist: {e}")
         return [f"❌ Ошибка при получении списка банов: {e}"]
 
-
 async def gbanlist() -> list:
     """Получить список глобальных банов"""
     try:
-        sql.execute("SELECT * FROM gbans ORDER BY date DESC")
-        fetch = sql.fetchall()
+        fetch = await db.fetchall("SELECT * FROM gbans ORDER BY date DESC")
 
         if not fetch:
             return ["🌐 Нет глобально заблокированных пользователей!"]
@@ -1777,12 +1709,10 @@ async def gbanlist() -> list:
         print(f"Ошибка в gbanlist: {e}")
         return [f"❌ Ошибка при получении списка глобальных банов: {e}"]
 
-
 async def gcheckban(user_id: int, chat_id: int = None) -> dict:
     """Проверить глобальный бан пользователя"""
     try:
-        sql.execute("SELECT * FROM gbans WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        fetch = await db.fetchone('SELECT * FROM gbans WHERE user_id = $1', user_id,)
         if fetch is None:
             return False
         else:
@@ -1797,7 +1727,6 @@ async def gcheckban(user_id: int, chat_id: int = None) -> dict:
         print(f"Ошибка в gcheckban: {e}")
         return False
 
-
 async def cleanup_bans():
     """Периодически проверяет и снимает истекшие баны"""
     while True:
@@ -1805,8 +1734,7 @@ async def cleanup_bans():
             current_time = time.time()
 
             # Получаем все таблицы банов
-            sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bans_%'")
-            tables = sql.fetchall()
+            tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'bans_%'")
 
             for table in tables:
                 table_name = table[0]
@@ -1823,16 +1751,15 @@ async def cleanup_bans():
                     continue
 
                 # Проверяем, есть ли колонка ban_expire
-                sql.execute(f"PRAGMA table_info({table_name})")
-                columns = sql.fetchall()
+                columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
                 column_names = [col[1] for col in columns]
 
                 if 'ban_expire' in column_names:
                     # Находим истекшие баны
-                    sql.execute(
-                        f"SELECT user_id, ban_expire FROM {table_name} WHERE ban_expire > 0 AND ban_expire <= ?",
+                    expired_bans = await db.fetchall(
+                        f"SELECT user_id, ban_expire FROM {table_name} WHERE ban_expire > 0 AND ban_expire <= $1",
                         (current_time,))
-                    expired_bans = sql.fetchall()
 
                     for expired in expired_bans:
                         user_id = expired[0]
@@ -1845,7 +1772,6 @@ async def cleanup_bans():
         except Exception as e:
             print(f"Ошибка в cleanup_bans: {e}")
             await asyncio.sleep(60)
-
 
 def parse_duration(duration_str: str) -> tuple:
     """
@@ -1893,44 +1819,38 @@ def parse_duration(duration_str: str) -> tuple:
     print(f"DEBUG parse_duration: единица не найдена, возвращаем навсегда")
     return (0, "навсегда")
 
-
 async def quiet(chat_id=int):
-    sql.execute(f"SELECT silence FROM chats WHERE chat_id = {chat_id}")
-    result = sql.fetchone()[0]
+    result = await db.fetchone(f"SELECT silence FROM chats WHERE chat_id = {chat_id}")
+
     if not await get_logic(result):
-        sql.execute(f"UPDATE chats SET silence = 1 WHERE chat_id = {chat_id}")
-        database.commit()
+        await db.execute(f"UPDATE chats SET silence = 1 WHERE chat_id = {chat_id}")
+        pass
         return True
     else:
-        sql.execute(f"UPDATE chats SET silence = 0 WHERE chat_id = {chat_id}")
-        database.commit()
+        await db.execute(f"UPDATE chats SET silence = 0 WHERE chat_id = {chat_id}")
+        pass
         return False
 
-
 async def get_gpull_chats(chat_id=int):
-    sql.execute(f"SELECT owner_id, in_gpull FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT owner_id, in_gpull FROM chats WHERE chat_id = {chat_id}")
+
     if fetch == None: return False
     if not await get_logic(fetch[1]): return False
-    sql.execute(f"SELECT chat_id FROM chats WHERE owner_id = ? AND in_gpull = ?", (fetch[0], fetch[1]))
+    fetch2 = await db.fetchall(f"SELECT chat_id FROM chats WHERE owner_id = $1 AND in_gpull = $2", (fetch[0], fetch[1]))
     result = []
-    fetch2 = sql.fetchall()
     for i in fetch2:
         result.append(i[0])
     return result
 
-
 async def get_chat_id():
-    sql.execute(f"SELECT MAX(chat_id) FROM chats")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT MAX(chat_id) FROM chats")
+
     return fetch[0]
 
-
 async def gpull_id():
-    sql.execute(f"SELECT chat_id FROM chats")
-    fetch = sql.fetchall()
-    return fetch
+    fetch = await db.fetchall(f"SELECT chat_id FROM chats")
 
+    return fetch
 
 async def check(self, message: Message) -> bool:
     msg_id = f"{message.from_id}_{message.date}"
@@ -1943,87 +1863,73 @@ async def check(self, message: Message) -> bool:
             self.processed_messages.clear()
     return True
 
-
 async def get_gpull_id(chat_id=int):
-    sql.execute(f"SELECT in_gpull FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT in_gpull FROM chats WHERE chat_id = {chat_id}")
+
     return fetch[0]
 
-
 async def get_pull_chats(chat_id=int):
-    sql.execute(f"SELECT owner_id, in_pull FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT owner_id, in_pull FROM chats WHERE chat_id = {chat_id}")
+
     if fetch == None: return False
     if not await get_logic(fetch[1]): return False
-    sql.execute(f"SELECT chat_id FROM chats WHERE owner_id = ? AND in_pull = ?", (fetch[0], fetch[1]))
+    fetch2 = await db.fetchall(f"SELECT chat_id FROM chats WHERE owner_id = $1 AND in_pull = $2", (fetch[0], fetch[1]))
     result = []
-    fetch2 = sql.fetchall()
     for i in fetch2:
         result.append(i[0])
     return result
 
-
 async def get_pull_id(chat_id=int):
-    sql.execute(f"SELECT in_pull FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT in_pull FROM chats WHERE chat_id = {chat_id}")
+
     return fetch[0]
 
-
 async def rnickall(chat_id=int):
-    sql.execute(f"DELETE FROM nicks_{chat_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM nicks_{chat_id}")
+    pass
 
 async def banwords(slovo=str, delete=bool, chat_id=int):
     if delete:
-        sql.execute(f"DELETE FROM banwords_{chat_id} WHERE banword = ?", (slovo,))
-        database.commit()
+        await db.execute(f"DELETE FROM banwords_{chat_id} WHERE banword = $1", (slovo,))
+        pass
     else:
-        sql.execute(f"SELECT * FROM banwords_{chat_id} WHERE banword = ?", (slovo,))
-        fetch = sql.fetchone()
-        if fetch == None:
-            sql.execute(f"INSERT INTO banwords_{chat_id} VALUES (?)", (slovo,))
-            database.commit()
+        fetch = await db.fetchone(f"SELECT * FROM banwords_{chat_id} WHERE banword = $1", (slovo,))
 
+        if fetch == None:
+            await db.execute(f"INSERT INTO banwords_{chat_id} VALUES ($1)", (slovo,))
+            pass
 
 async def get_invite_kick(chat_id=int):
-    sql.execute(f"SELECT invite_kick FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
-    return await get_logic(fetch[0])
+    fetch = await db.fetchone(f"SELECT invite_kick FROM chats WHERE chat_id = {chat_id}")
 
+    return await get_logic(fetch[0])
 
 async def get_leave_kick(chat_id=int):
-    sql.execute(f"SELECT leave_kick FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
-    return await get_logic(fetch[0])
+    fetch = await db.fetchone(f"SELECT leave_kick FROM chats WHERE chat_id = {chat_id}")
 
+    return await get_logic(fetch[0])
 
 async def set_filter(chat_id=int, value=int):
-    sql.execute("UPDATE chats SET filter = ? WHERE chat_id = ?", (value, chat_id))
-    database.commit()
-
+    await db.execute("UPDATE chats SET filter = $1 WHERE chat_id = $2", (value, chat_id))
+    pass
 
 async def get_filter(chat_id=int):
-    sql.execute(f"SELECT filter FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
-    return await get_logic(fetch[0])
+    fetch = await db.fetchone(f"SELECT filter FROM chats WHERE chat_id = {chat_id}")
 
+    return await get_logic(fetch[0])
 
 async def get_antiflood(chat_id=int):
-    sql.execute(f"SELECT antiflood FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT antiflood FROM chats WHERE chat_id = {chat_id}")
+
     return await get_logic(fetch[0])
 
-
 async def set_antiflood(chat_id=int, value=int):
-    sql.execute("UPDATE chats SET antiflood = ? WHERE chat_id = ?", (value, chat_id))
-    database.commit()
-
+    await db.execute("UPDATE chats SET antiflood = $1 WHERE chat_id = $2", (value, chat_id))
+    pass
 
 async def get_spam(user_id=int, chat_id=int):
-    sql.execute(
+    fetch = await db.fetchall(
         f"SELECT date_string FROM messages_{chat_id}  WHERE user_id = {user_id} ORDER BY date_string DESC LIMIT 5")
-    fetch = sql.fetchall()
     list_messages = []
     for i in fetch:
         list_messages.append(datetime.fromisoformat(i[0]))
@@ -2037,78 +1943,64 @@ async def get_spam(user_id=int, chat_id=int):
     else:
         return False
 
-
 async def set_welcome(chat_id=int, text=int):
-    sql.execute(f"UPDATE chats SET welcome_text = ? WHERE chat_id = ?", (text, chat_id))
-    database.commit()
-
+    await db.execute(f"UPDATE chats SET welcome_text = $1 WHERE chat_id = $2", (text, chat_id))
+    pass
 
 async def get_welcome(chat_id=int):
-    sql.execute("SELECT welcome_text FROM chats WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT welcome_text FROM chats WHERE chat_id = $1', chat_id,)
     if str(fetch[0]).lower().strip() == "off":
         return False
     else:
         return str(fetch[0])
 
-
 async def set_rules(chat_id=int, text=int):
-    sql.execute("SELECT text FROM rules WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT text FROM rules WHERE chat_id = $1', chat_id,)
     if fetch:
-        sql.execute("UPDATE rules SET text = ? WHERE chat_id = ?", (text, chat_id))
-        database.commit()
+        await db.execute("UPDATE rules SET text = $1 WHERE chat_id = $2", (text, chat_id))
+        pass
     else:
-        sql.execute(f"INSERT INTO rules(chat_id, text) VALUES (?, ?)", (chat_id, text))
-        database.commit()
-
+        await db.execute(f"INSERT INTO rules(chat_id, text) VALUES ($1, $2)", (chat_id, text))
+        pass
 
 async def get_rules(chat_id=int):
-    sql.execute("SELECT text FROM rules WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT text FROM rules WHERE chat_id = $1', chat_id,)
     if fetch:
         if str(fetch[0]).lower().strip() == "off":
             return False
         else:
             return fetch
-
 
 async def set_info(chat_id=int, text=int):
-    sql.execute("SELECT text FROM info WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT text FROM info WHERE chat_id = $1', chat_id,)
     if fetch:
-        sql.execute("UPDATE info SET text = ? WHERE chat_id = ?", (text, chat_id))
-        database.commit()
+        await db.execute("UPDATE info SET text = $1 WHERE chat_id = $2", (text, chat_id))
+        pass
     else:
-        sql.execute(f"INSERT INTO info(chat_id, text) VALUES (?, ?)", (chat_id, text))
-        database.commit()
-
+        await db.execute(f"INSERT INTO info(chat_id, text) VALUES ($1, $2)", (chat_id, text))
+        pass
 
 async def get_info(chat_id=int):
-    sql.execute("SELECT text FROM info WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT text FROM info WHERE chat_id = $1', chat_id,)
     if fetch:
         if str(fetch[0]).lower().strip() == "off":
             return False
         else:
             return fetch
 
-
 async def invite_kick(chat_id=int, change=None):
-    sql.execute("SELECT invite_kick FROM chats WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT invite_kick FROM chats WHERE chat_id = $1', chat_id,)
     if not change == None:
         if await get_logic(fetch[0]):
-            sql.execute("UPDATE chats SET invite_kick = 0 WHERE chat_id = ?", (chat_id,))
-            database.commit()
+            await db.execute("UPDATE chats SET invite_kick = 0 WHERE chat_id = $1", (chat_id,))
+            pass
             return False
         else:
-            sql.execute("UPDATE chats SET invite_kick = 1 WHERE chat_id = ?", (chat_id,))
-            database.commit()
+            await db.execute("UPDATE chats SET invite_kick = 1 WHERE chat_id = $1", (chat_id,))
+            pass
             return True
     else:
         return await get_logic(fetch[0])
-
 
 async def get_logic(number=int):
     if number < 1:
@@ -2116,29 +2008,25 @@ async def get_logic(number=int):
     else:
         return True
 
-
 async def leave_kick(chat_id=int, change=None):
-    sql.execute("SELECT leave_kick FROM chats WHERE chat_id = ?", (chat_id,))
-    fetch = sql.fetchone()
+    fetch = await db.fetchone('SELECT leave_kick FROM chats WHERE chat_id = $1', chat_id,)
     if fetch == None: return False
     if change == None: return await get_logic(fetch[0])
     if await get_logic(fetch[0]):
-        sql.execute("UPDATE chats SET leave_kick = 0 WHERE chat_id = ?", (chat_id,))
-        database.commit()
+        await db.execute("UPDATE chats SET leave_kick = 0 WHERE chat_id = $1", (chat_id,))
+        pass
         return False
     else:
-        sql.execute("UPDATE chats SET leave_kick = 1 WHERE chat_id = ?", (chat_id,))
-        database.commit()
+        await db.execute("UPDATE chats SET leave_kick = 1 WHERE chat_id = $1", (chat_id,))
+        pass
         return True
-
 
 async def message_stats(user_id=int, chat_id=int):
     try:
-        sql.execute(f"SELECT date_string FROM messages_{chat_id} WHERE user_id = ?", (user_id,))
-        fetch_all = sql.fetchall()
-        sql.execute(f"SELECT date_string FROM messages_{chat_id} WHERE user_id = ? ORDER BY date_string DESC LIMIT 1",
-                    (user_id,))
-        fetch_last = sql.fetchone()
+        fetch_all = await db.fetchall(f"SELECT date_string FROM messages_{chat_id} WHERE user_id = $1", (user_id,))
+
+        fetch_last = await db.fetchone(f"SELECT date_string FROM messages_{chat_id} WHERE user_id = $1 ORDER BY date_string DESC LIMIT 1", (user_id,))
+
         last = fetch_last[0]
         return {
             'count': len(fetch_all),
@@ -2149,7 +2037,6 @@ async def message_stats(user_id=int, chat_id=int):
             'count': 0,
             'last': 0
         }
-
 
 async def get_chat_title(bot: Bot, peer_id: int) -> str or None:
     try:
@@ -2164,51 +2051,44 @@ async def get_chat_title(bot: Bot, peer_id: int) -> str or None:
         print(f"Ошибка при получении названия беседы: {e}")
         return None
 
-
 async def set_gpull(chat_id=int, value=int, glob=str):
-    sql.execute(f"UPDATE chats SET in_gpull = ? WHERE chat_id = ?", (value, chat_id))
-    database.commit()
-
+    await db.execute(f"UPDATE chats SET in_gpull = $1 WHERE chat_id = $2", (value, chat_id))
+    pass
 
 async def set_pull(chat_id=int, value=int):
-    sql.execute(f"UPDATE chats SET in_pull = ? WHERE chat_id = ?", (value, chat_id))
-    database.commit()
-
+    await db.execute(f"UPDATE chats SET in_pull = $1 WHERE chat_id = $2", (value, chat_id))
+    pass
 
 async def get_user_nam(user_id=int, chat_id=int):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    fetch = await db.fetchone(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
+
     if not fetch == None:
         return fetch[0]
 
-
 async def get_all_peerids():
-    sql.execute("SELECT peer_id FROM chats")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall("SELECT peer_id FROM chats")
+
     peer_ids = []
     for i in fetch:
         peer_ids.append(i[0])
     return peer_ids
 
-
 async def add_punishment(chat_id=int, user_id=int):
     cd = str(moscow_now()).split('.')
     date_string = cd[0]
-    sql.execute(f"INSERT INTO punishments_{chat_id} VALUES (?, ?)", (user_id, date_string))
-    database.commit()
-
+    await db.execute(f"INSERT INTO punishments_{chat_id} VALUES ($1, $2)", (user_id, date_string))
+    pass
 
 async def remove_punishment(chat_id=int, user_id=int):
     try:
-        sql.execute(f"DELETE FROM punishments_{chat_id} WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute(f"DELETE FROM punishments_{chat_id} WHERE user_id = $1", (user_id,))
+        pass
     except Exception as e:
         print('error {e}')
 
-
 async def get_sliv(user_id=int, chat_id=int):
-    sql.execute(f"SELECT date FROM punishments_{chat_id}  WHERE user_id = {user_id} ORDER BY date DESC LIMIT 3")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SELECT date FROM punishments_{chat_id}  WHERE user_id = {user_id} ORDER BY date DESC LIMIT 3")
+
     list_messages = []
     for i in fetch:
         list_messages.append(datetime.fromisoformat(i[0]))
@@ -2221,15 +2101,13 @@ async def get_sliv(user_id=int, chat_id=int):
     else:
         return False
 
-
 async def staff_zov(chat_id=int):
-    sql.execute(f"SElECT user_id FROM permissions_{chat_id}")
-    fetch = sql.fetchall()
+    fetch = await db.fetchall(f"SElECT user_id FROM permissions_{chat_id}")
+
     staff_zov_str = []
     for i in fetch:
         staff_zov_str.append(f"{await get_user_or_group_mention(i[0])} (⚜️)")
     return ''.join(staff_zov_str)
-
 
 async def delete_message(group_id=int, peer_id=int, cmid=int):
     try:
@@ -2237,12 +2115,10 @@ async def delete_message(group_id=int, peer_id=int, cmid=int):
     except:
         pass
 
-
 async def fix_old_bans():
     """Обновляет старые записи банов, добавляя информацию о времени"""
     try:
-        sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bans_%'")
-        tables = sql.fetchall()
+        tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'bans_%'")
 
         for table in tables:
             table_name = table[0]
@@ -2250,16 +2126,15 @@ async def fix_old_bans():
                 continue
 
             # Проверяем структуру
-            sql.execute(f"PRAGMA table_info({table_name})")
-            columns = sql.fetchall()
+            columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
             column_names = [col[1] for col in columns]
 
             # Если есть колонки времени, обновляем старые записи
             if 'ban_time' in column_names and 'ban_expire' in column_names:
                 # Находим записи где ban_time = 0 но есть date
-                sql.execute(
+                old_bans = await db.fetchall(
                     f"SELECT rowid, user_id, date, date_string FROM {table_name} WHERE ban_time = 0 OR ban_time IS NULL")
-                old_bans = sql.fetchall()
 
                 for old in old_bans:
                     rowid = old[0]
@@ -2268,28 +2143,26 @@ async def fix_old_bans():
                     date_string = old[3]
 
                     # Оставляем как навсегда (это старые баны)
-                    sql.execute(f"""
+                    await db.execute(f"""
                         UPDATE {table_name} 
                         SET ban_time = 0, ban_expire = 0, ban_duration_text = 'навсегда'
-                        WHERE rowid = ?
+                        WHERE rowid = $1
                     """, (rowid,))
 
                     print(f"Обновлена запись для пользователя {user_id} в {table_name}")
 
-                database.commit()
+                pass
                 print(f"✅ Обновлены старые записи в {table_name}")
 
         print("✅ Все старые записи банов обновлены!")
     except Exception as e:
         print(f"Ошибка при обновлении старых банов: {e}")
 
-
 async def get_role_appointment_date(user_id=int, chat_id=int):
     """Получить дату назначения на роль модератора"""
     try:
-        sql.execute(f"SELECT appointment_date FROM role_appointments WHERE user_id = ? AND chat_id = ?",
-                    (user_id, chat_id))
-        fetch = sql.fetchone()
+        fetch = await db.fetchone(f"SELECT appointment_date FROM role_appointments WHERE user_id = $1 AND chat_id = $2", (user_id, chat_id))
+
         if fetch:
             return fetch[0]
         else:
@@ -2303,11 +2176,9 @@ async def get_role_appointment_date(user_id=int, chat_id=int):
             print(f"Ошибка при получении даты назначения: {e}")
             return None
 
-
 async def set_owner(user=int, chat_id=int):
-    sql.execute("UPDATE chats SET owner_id = ? WHERE chat_id = ?", (user, chat_id))
-    database.commit()
-
+    await db.execute("UPDATE chats SET owner_id = $1 WHERE chat_id = $2", (user, chat_id))
+    pass
 
 @bot.on.chat_message(rules.ChatActionRule("chat_kick_user"))
 async def user_leave(message: Message) -> None:
@@ -2322,7 +2193,6 @@ async def user_leave(message: Message) -> None:
             pass
         user_display = await get_user_or_group_mention(user_id)
         await message.answer(f"{user_display} вышел(-а) и был исключен из беседы", disable_mentions=1)
-
 
 @bot.on.chat_message(rules.ChatActionRule("chat_invite_user_by_link"))
 async def user_joined_link(message: Message) -> None:
@@ -2369,7 +2239,6 @@ async def user_joined_link(message: Message) -> None:
         welcome = welcome.replace('%p', user_display)
         await message.answer(welcome)
 
-
 @bot.on.chat_message(rules.ChatActionRule("chat_invite_user"))
 async def user_joined(message: Message) -> None:
     invited_user = message.action.member_id
@@ -2413,7 +2282,7 @@ async def user_joined(message: Message) -> None:
                 pass
             info = await bot.api.users.get(invited_user)
         print('1')
-        if await get_role(user_id, chat_id) < 1 and await invite_kick(chat_id):
+        if await get_role_cached(user_id, chat_id) < 1 and await invite_kick(chat_id):
             try:
                 await bot.api.messages.remove_chat_user(chat_id, invited_user)
             except:
@@ -2460,21 +2329,17 @@ async def user_joined(message: Message) -> None:
                 disable_mentions=1, keyboard=keyboard
             )
 
-
 async def get_moderator_stats(user_id=int, chat_id=int):
     """Получить статистику модератора в конкретном чате"""
     try:
         # Количество выданных мутов
-        sql.execute(f"SELECT COUNT(*) FROM mutes_{chat_id} WHERE moder = ?", (user_id,))
-        mutes_count = sql.fetchone()[0] or 0
+        mutes_count = await db.fetchone(f"SELECT COUNT(*) FROM mutes_{chat_id} WHERE moder = $1", (user_id,))
 
         # Количество выданных варнов (из истории)
-        sql.execute(f"SELECT COUNT(*) FROM warnhistory_{chat_id} WHERE moder = ?", (user_id,))
-        warns_count = sql.fetchone()[0] or 0
+        warns_count = await db.fetchone(f"SELECT COUNT(*) FROM warnhistory_{chat_id} WHERE moder = $1", (user_id,))
 
         # Количество выданных банов
-        sql.execute(f"SELECT COUNT(*) FROM bans_{chat_id} WHERE moder = ?", (user_id,))
-        bans_count = sql.fetchone()[0] or 0
+        bans_count = await db.fetchone(f"SELECT COUNT(*) FROM bans_{chat_id} WHERE moder = $1", (user_id,))
 
         # Дата назначения на роль
         appointment_date = await get_role_appointment_date(user_id, chat_id)
@@ -2489,7 +2354,7 @@ async def get_moderator_stats(user_id=int, chat_id=int):
             appointment_str = "Данные не найдены в БД"
 
         # Получаем текущую роль пользователя
-        current_role = await get_role(user_id, chat_id)
+        current_role = await get_role_cached(user_id, chat_id)
         role_names = {
             1: "Модератор",
             2: "Старший модератор",
@@ -2513,16 +2378,13 @@ async def get_moderator_stats(user_id=int, chat_id=int):
         print(f"Ошибка при получении статистики модератора: {e}")
         return None
 
-
 def save_data(file, data):
     with open(file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
 # Загружаем конфиг
 with open("config2.json", "r") as js:
     open_file = json.load(js)
-
 
 @bot.on.raw_event(GroupEventType.MESSAGE_EVENT, dataclass=GroupTypes.MessageEvent)
 async def handle_all_callbacks(message):
@@ -2547,7 +2409,7 @@ async def handle_all_callbacks(message):
 
     # Команда modersallminus
     if command == "modersallminus":
-        if await get_role(user_id, chat_id) < 9:
+        if await get_role_cached(user_id, chat_id) < 9:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2567,8 +2429,7 @@ async def handle_all_callbacks(message):
             )
             return
 
-        sql.execute("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
-        logs = sql.fetchall()
+        logs = await db.fetchall("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -2616,7 +2477,7 @@ async def handle_all_callbacks(message):
 
     # Команда modersallplus
     if command == "modersallplus":
-        if await get_role(user_id, chat_id) < 9:
+        if await get_role_cached(user_id, chat_id) < 9:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2627,8 +2488,7 @@ async def handle_all_callbacks(message):
 
         page = payload.get("page")
 
-        sql.execute("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
-        logs = sql.fetchall()
+        logs = await db.fetchall("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -2685,7 +2545,7 @@ async def handle_all_callbacks(message):
 
     # Команда nicksminus
     if command == "nicksminus":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2719,7 +2579,7 @@ async def handle_all_callbacks(message):
 
     # Команда nicksplus
     if command == "nicksplus":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2754,7 +2614,7 @@ async def handle_all_callbacks(message):
 
     # Команда activeWarns (активные предупреждения)
     if command == "activewarns":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2802,7 +2662,7 @@ async def handle_all_callbacks(message):
 
     # Команда stats для колбэков
     if command == "stats":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2822,7 +2682,7 @@ async def handle_all_callbacks(message):
             return
 
         # Получаем статистику пользователя
-        role = await get_role(target_user, chat_id)
+        role = await get_role_cached(target_user, chat_id)
         warns = await get_warns(target_user, chat_id)
         if await is_nick(target_user, chat_id):
             nick = await get_user_nam(target_user, chat_id)
@@ -2861,7 +2721,7 @@ async def handle_all_callbacks(message):
 
     # Команда warnhistory для колбэков
     if command == "warnhistory":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2910,7 +2770,7 @@ async def handle_all_callbacks(message):
 
     # Команда nonicks
     if command == "nonicks":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2937,7 +2797,7 @@ async def handle_all_callbacks(message):
 
     # Команда nicks
     if command == "nicks":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -2964,7 +2824,7 @@ async def handle_all_callbacks(message):
 
     # Команда nonickminus
     if command == "nonickminus":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3000,7 +2860,7 @@ async def handle_all_callbacks(message):
 
     # Команда nonickplus
     if command == "nonickplus":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3027,7 +2887,7 @@ async def handle_all_callbacks(message):
 
     # Команда clear
     if command == "clear":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3051,7 +2911,7 @@ async def handle_all_callbacks(message):
 
     # Команда unwarn
     if command == "unwarn":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3085,7 +2945,7 @@ async def handle_all_callbacks(message):
 
     # Команда unmute
     if command == "unmute":
-        if await get_role(user_id, chat_id) < 1:
+        if await get_role_cached(user_id, chat_id) < 1:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3094,7 +2954,7 @@ async def handle_all_callbacks(message):
             )
             return
         user = payload.get("user")
-        if await get_role(user_id, chat_id) <= await get_role(user, chat_id):
+        if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id):
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3118,7 +2978,7 @@ async def handle_all_callbacks(message):
 
     # Команда unban
     if command == "unban":
-        if await get_role(user_id, chat_id) < 2:
+        if await get_role_cached(user_id, chat_id) < 2:
             await bot.api.messages.send_message_event_answer(
                 event_id=message.object.event_id,
                 peer_id=message.object.peer_id,
@@ -3249,7 +3109,7 @@ async def handle_all_callbacks(message):
                 '/editowner — none',
             ],
         }
-        user_role = await get_role(user_id, chat_id)
+        user_role = await get_role_cached(user_id, chat_id)
         commands = []
         for i in commands_levels.keys():
             if i <= user_role:
@@ -3260,29 +3120,25 @@ async def handle_all_callbacks(message):
                                     conversation_message_id=message.object.conversation_message_id, keyboard=None)
         return
 
-
 @bot.on.private_message()
 async def on_private_message(message: Message):
     await message.reply(
         'Здравствуйте, к сожалению, данный бот не принимает команды в личные сообщения, он создан для модерации бесед.\nЕсли вы хотите связать с разработчиком бота - @roman_makendi.\nЖелаем вам удачного использования нашего чат-бота GREAT MANAGER!')
     return True
 
-
 async def chats_log(user_id=None, target_id=None, role=None, log=None):
     try:
-        sql.execute(
-            "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+        await db.execute(
+            "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
             (user_id, target_id, role, log)
         )
-        database.commit()
+        pass
         print(f"")
     except Exception as e:
         print(f"")
 
-
 def format_number(n: int) -> str:
     return f"{n:,}".replace(",", ".")
-
 
 @bot.on.chat_message()
 async def on_chat_message(message: Message):
@@ -3310,11 +3166,11 @@ async def on_chat_message(message: Message):
     arguments = message.text.split(' ')
     arguments_lower = message.text.lower().split(' ')
     try:
-        sql.execute("SELECT chat_id FROM banschats WHERE chat_id = ?", (chat_id,))
-        if sql.fetchone():
+        if await db.fetchone("SELECT chat_id FROM banschats WHERE chat_id = $1", (chat_id,)):
+
             await message.reply("Имеется блокировка чата. Hе буду здесь работать.")
             return True
-    except sqlite3.OperationalError:
+    except Exception:
         # Если таблицы нет, значит нет и блокировок
         pass
 
@@ -3333,8 +3189,8 @@ async def on_chat_message(message: Message):
         return True
 
     try:
-        sql.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (user_id,))
-        if sql.fetchone():
+        if await db.fetchone("SELECT user_id FROM blacklist WHERE user_id = $1", (user_id,)):
+
             return True
     except:
         pass
@@ -3351,7 +3207,7 @@ async def on_chat_message(message: Message):
                         is_command = True
 
                 # Если это НЕ команда или команда от обычного пользователя - удаляем
-                if not is_command or await get_role(user_id, chat_id) < 1:
+                if not is_command or await get_role_cached(user_id, chat_id) < 1:
                     try:
                         await bot.api.messages.delete(
                             group_id=message.group_id,
@@ -3363,13 +3219,13 @@ async def on_chat_message(message: Message):
                         print(f"Ошибка при удалении сообщения замьюченного пользователя: {e}")
 
             # Далее остальные проверки (режим тишины и т.д.)
-            elif await check_quit(chat_id) and await get_role(user_id, chat_id) < 1:
+            elif await check_quit(chat_id) and await get_role_cached(user_id, chat_id) < 1:
                 try:
                     await bot.api.messages.delete(group_id=message.group_id, peer_id=message.peer_id,
                                                   delete_for_all=True, cmids=message.conversation_message_id)
                 except:
                     pass
-            elif await check_quit(chat_id) and await get_role(user_id, chat_id) < 1:
+            elif await check_quit(chat_id) and await get_role_cached(user_id, chat_id) < 1:
                 try:
                     await bot.api.messages.delete(group_id=message.group_id, peer_id=message.peer_id,
                                                   delete_for_all=True, cmids=message.conversation_message_id)
@@ -3377,7 +3233,7 @@ async def on_chat_message(message: Message):
                     pass
             else:
                 for i in await get_banwords(chat_id):
-                    if i in message.text.lower() and await get_role(user_id, chat_id) < 1:
+                    if i in message.text.lower() and await get_role_cached(user_id, chat_id) < 1:
                         await mute(user_id, chat_id, 'Бот', 'Написание запрещенных слов', 30)
                         keyboard = (
                             Keyboard(inline=True)
@@ -3395,28 +3251,28 @@ async def on_chat_message(message: Message):
                         return True
         global bot_enabled, chat_mode, enabled_chats
         if command in ['startbot', 'включибот']:
-            if await get_role(user_id, chat_id) < 11:
+            if await get_role_cached(user_id, chat_id) < 11:
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
                 return
             bot_enabled = True
             await message.reply("Бот включен!", disable_mentions=1)
             return
         elif command in ['offbot', 'выключибот']:
-            if (await get_role(user_id, chat_id) or 0) < 11:
+            if (await get_role_cached(user_id, chat_id) or 0) < 11:
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
                 return
             bot_enabled = False
             await message.reply("Бот выключен!", disable_mentions=1)
             return
         elif command in ['startbotchat', 'включиботчат']:
-            if (await get_role(user_id, chat_id) or 0) < 11:
+            if (await get_role_cached(user_id, chat_id) or 0) < 11:
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
                 return
             bot_enabled = False
             await message.reply("Бот выключен во всех чатах.", disable_mentions=1)
             return
         elif command in ['startbotchat', 'включиботчат']:
-            if (await get_role(user_id, chat_id) or 0) < 9:
+            if (await get_role_cached(user_id, chat_id) or 0) < 9:
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
                 return
             if not chat_id:
@@ -3427,7 +3283,7 @@ async def on_chat_message(message: Message):
             await message.reply("Бот активен только в этом чате. Режим: локальный.", disable_mentions=1)
             return
         elif command in ['stopbotchat', 'выключиботчат']:
-            if await get_role(user_id, chat_id) < 11:
+            if await get_role_cached(user_id, chat_id) < 11:
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
                 return
             if not chat_id:
@@ -3495,7 +3351,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['banid', 'забанитьчат', 'забанить']:
-            if (await get_role(user_id, chat_id) or 0) < 7:
+            if (await get_role_cached(user_id, chat_id) or 0) < 7:
                 await message.replyLocalizedMessage('Недостаточно прав!')
                 return True
             if len(arguments) < 2:
@@ -3506,12 +3362,12 @@ async def on_chat_message(message: Message):
             except:
                 await message.reply("Укажите чат!")
                 return True
-            sql.execute("SELECT chat_id FROM banschats WHERE chat_id = ?", (target_chat,))
-            if sql.fetchone():
+            if await db.fetchone("SELECT chat_id FROM banschats WHERE chat_id = $1", (target_chat,)):
+
                 await message.reply("Беседа уже находится в блокировке!")
                 return True
-            sql.execute("INSERT INTO banschats (chat_id) VALUES (?)", (target_chat,))
-            database.commit()
+            await db.execute("INSERT INTO banschats (chat_id) VALUES ($1)", (target_chat,))
+            pass
             target_peer = 2000000000 + target_chat
             await bot.api.messages.send(
                 peer_id=target_peer,
@@ -3526,7 +3382,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ["unbanid", "разбанчата"]:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.replyLocalizedMessage('Недостаточно прав!')
                 return True
             if len(arguments) < 2:
@@ -3537,12 +3393,12 @@ async def on_chat_message(message: Message):
             except:
                 await message.reply("Укажите чат!")
                 return True
-            sql.execute("SELECT chat_id FROM banschats WHERE chat_id = ?", (target_chat,))
-            if not sql.fetchone():
+            if not await db.fetchone("SELECT chat_id FROM banschats WHERE chat_id = $1", (target_chat,)):
+
                 await message.reply("Беседа и так находится в блокировке!")
                 return True
-            sql.execute("DELETE FROM banschats WHERE chat_id = ?", (target_chat,))
-            database.commit()
+            await db.execute("DELETE FROM banschats WHERE chat_id = $1", (target_chat,))
+            pass
             target_peer = 2000000000 + target_chat
             await bot.api.messages.send(
                 peer_id=target_peer,
@@ -3557,7 +3413,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addwhiteruk']:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.reply("Недостаточно прав!")
                 return True
             user = int
@@ -3579,7 +3435,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['delwhiteruk']:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.reply("Недостаточно прав!")
                 return True
             user = int
@@ -3607,7 +3463,7 @@ async def on_chat_message(message: Message):
 
         # ================== КОМАНДЫ СПЕЦИАЛЬНОГО РУКОВОДИТЕЛЯ (10+) ==================
         if command in ['обнулитьбанк', 'resetbank']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3621,8 +3477,8 @@ async def on_chat_message(message: Message):
                 return True
 
             # Обнуляем банк
-            sql.execute("UPDATE balance SET bank = 0 WHERE user_id = ?", (target_id,))
-            database.commit()
+            await db.execute("UPDATE balance SET bank = 0 WHERE user_id = $1", (target_id,))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3634,15 +3490,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил банк пользователю {target_id}")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['обнулитьвип', 'resetvip']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3656,8 +3512,8 @@ async def on_chat_message(message: Message):
                 return True
 
             # Удаляем VIP статус
-            sql.execute("DELETE FROM vip WHERE user_id = ?", (target_id,))
-            database.commit()
+            await db.execute("DELETE FROM vip WHERE user_id = $1", (target_id,))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3669,15 +3525,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил VIP статус пользователю {target_id}")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['обнулитьимущ', 'resetproperty']:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (9+)", disable_mentions=1)
                 return True
 
@@ -3691,18 +3547,16 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем количество домов и машин до удаления
-            sql.execute("SELECT COUNT(*) FROM houses WHERE user_id = ?", (target_id,))
-            houses_count = sql.fetchone()[0]
+            houses_count = await db.fetchone('SELECT COUNT(*) FROM houses WHERE user_id = $1', target_id,)
 
-            sql.execute("SELECT COUNT(*) FROM cars WHERE user_id = ?", (target_id,))
-            cars_count = sql.fetchone()[0]
+            cars_count = await db.fetchone('SELECT COUNT(*) FROM cars WHERE user_id = $1', target_id,)
 
             # Удаляем все дома
-            sql.execute("DELETE FROM houses WHERE user_id = ?", (target_id,))
+            await db.execute("DELETE FROM houses WHERE user_id = $1", (target_id,))
 
             # Удаляем все машины
-            sql.execute("DELETE FROM cars WHERE user_id = ?", (target_id,))
-            database.commit()
+            await db.execute("DELETE FROM cars WHERE user_id = $1", (target_id,))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3715,15 +3569,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил имущество пользователю {target_id} (дома: {houses_count}, машины: {cars_count})")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['удалитьклан', 'deleteclan']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3734,16 +3588,14 @@ async def on_chat_message(message: Message):
             # Пытаемся найти клан по ID
             try:
                 clan_id = int(arguments[1])
-                sql.execute("SELECT name FROM clans WHERE clan_id = ?", (clan_id,))
-                clan = sql.fetchone()
+                clan = await db.fetchone('SELECT name FROM clans WHERE clan_id = $1', clan_id,)
                 if not clan:
                     await message.reply("❌ Клан с таким ID не найден!", disable_mentions=1)
                     return True
             except ValueError:
                 # Ищем по названию
                 clan_name = " ".join(arguments[1:])
-                sql.execute("SELECT clan_id, name FROM clans WHERE LOWER(name) LIKE LOWER(?)", (f"%{clan_name}%",))
-                clan = sql.fetchone()
+                clan = await db.fetchone('SELECT clan_id, name FROM clans WHERE LOWER(name) LIKE LOWER($1)', f"%{clan_name}%",)
                 if not clan:
                     await message.reply("❌ Клан не найден!", disable_mentions=1)
                     return True
@@ -3753,9 +3605,9 @@ async def on_chat_message(message: Message):
             clan_name = clan[0] if isinstance(clan, tuple) else clan
 
             # Удаляем клан
-            sql.execute("DELETE FROM clan_members WHERE clan_id = ?", (clan_id,))
-            sql.execute("DELETE FROM clans WHERE clan_id = ?", (clan_id,))
-            database.commit()
+            await db.execute("DELETE FROM clan_members WHERE clan_id = $1", (clan_id,))
+            await db.execute("DELETE FROM clans WHERE clan_id = $1", (clan_id,))
+            pass
 
             await message.reply(
                 f"✅ Клан удален!\n\n"
@@ -3765,15 +3617,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, 0, 9, f"удалил клан {clan_name} (ID: {clan_id})")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['обнулитьнавык', 'resetskill']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3787,11 +3639,11 @@ async def on_chat_message(message: Message):
                 return True
 
             # Обнуляем навык в jobs
-            sql.execute("UPDATE jobs SET skill = 0 WHERE user_id = ?", (target_id,))
+            await db.execute("UPDATE jobs SET skill = 0 WHERE user_id = $1", (target_id,))
 
             # Обнуляем в user_skills
-            sql.execute("UPDATE user_skills SET skill = 0 WHERE user_id = ?", (target_id,))
-            database.commit()
+            await db.execute("UPDATE user_skills SET skill = 0 WHERE user_id = $1", (target_id,))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3803,15 +3655,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил навык пользователю {target_id}")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['обнулитьбрак', 'resetmarriage']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3825,16 +3677,15 @@ async def on_chat_message(message: Message):
                 return True
 
             # Проверяем, есть ли запись о браке
-            sql.execute("SELECT * FROM marriage WHERE user1 = ? OR user2 = ?", (target_id, target_id))
-            marriage = sql.fetchone()
+            marriage = await db.fetchone('SELECT * FROM marriage WHERE user1 = $2 OR user2 = $1', target_id, target_id)
 
             if not marriage:
                 await message.reply("ℹ️ У пользователя нет активного брака!", disable_mentions=1)
                 return True
 
             # Удаляем брак
-            sql.execute("DELETE FROM marriage WHERE user1 = ? OR user2 = ?", (target_id, target_id))
-            database.commit()
+            await db.execute("DELETE FROM marriage WHERE user1 = $1 OR user2 = $2", (target_id, target_id))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3846,15 +3697,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил брак пользователю {target_id}")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['обнулитьбиз', 'resetbusiness']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("❌ Недостаточно прав! Команда доступна только Специальному Руководителю (10+)", disable_mentions=1)
                 return True
 
@@ -3868,16 +3719,15 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем количество бизнесов
-            sql.execute("SELECT COUNT(*) FROM user_businesses WHERE user_id = ?", (target_id,))
-            businesses_count = sql.fetchone()[0]
+            businesses_count = await db.fetchone('SELECT COUNT(*) FROM user_businesses WHERE user_id = $1', target_id,)
 
             if businesses_count == 0:
                 await message.reply("ℹ️ У пользователя нет бизнесов!", disable_mentions=1)
                 return True
 
             # Удаляем все бизнесы
-            sql.execute("DELETE FROM user_businesses WHERE user_id = ?", (target_id,))
-            database.commit()
+            await db.execute("DELETE FROM user_businesses WHERE user_id = $1", (target_id,))
+            pass
 
             target_display = await get_user_or_group_mention(target_id)
             await message.reply(
@@ -3889,15 +3739,15 @@ async def on_chat_message(message: Message):
             )
 
             # Логируем
-            sql.execute(
-                "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
+            await db.execute(
+                "INSERT INTO logchats (user_id, target_id, role, log) VALUES ($1, $2, $3, $4)",
                 (user_id, target_id, 9, f"обнулил бизнесы пользователю {target_id} (количество: {businesses_count})")
             )
-            database.commit()
+            pass
             return True
 
         if command in ['snick', 'setnick', 'nick', 'addnick', 'ник', 'сетник', 'сник']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!")
                 return True
@@ -3932,7 +3782,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['settings']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 5:
                 await message.reply("Недостаточно прав!")
                 return True
@@ -3959,8 +3809,7 @@ async def on_chat_message(message: Message):
             pull = await get_pull_id(chat_id)
             gpull = await get_gpull_id(chat_id)
 
-            sql.execute("SELECT chat_id FROM chats WHERE chat_id = ?", (chat_id,))
-            ir = sql.fetchone()
+            ir = await db.fetchone('SELECT chat_id FROM chats WHERE chat_id = $1', chat_id,)
             await message.reply(
                 f'Настройки беседы:\n\nАйди чата: {ir}\nCистема AntiFlood: {resultantif}\nДобавление администраторами: {resultinvite}\nИсключение при выходе: {resultleave}\nФильтр запрещенных слов: {resultfilter}\nСервер: {pull}\nГлобальный сервер: {gpull}')
             return True
@@ -3982,7 +3831,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['логиобщие', 'logs', 'logsmoders', 'логи']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 9:
                 await message.replyLocalizedMessage('not_preminisionss')
                 return True
@@ -3994,9 +3843,7 @@ async def on_chat_message(message: Message):
                 target = await getID(arguments[1])
 
             if target:
-                sql.execute("SELECT * FROM logchats WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999",
-                            (target,))
-                logs = sql.fetchall()
+                logs = await db.fetchall("SELECT * FROM logchats WHERE user_id = $1 ORDER BY rowid DESC LIMIT 9999999999999", (target,))
 
                 if not logs:
                     target_display = await get_user_or_group_mention(target)
@@ -4051,8 +3898,7 @@ async def on_chat_message(message: Message):
                 return True
 
             else:
-                sql.execute("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
-                logs = sql.fetchall()
+                logs = await db.fetchall("SELECT * FROM logchats ORDER BY rowid DESC LIMIT 9999999999999")
 
                 if not logs:
                     await message.reply(f"Логи с действиями модераторов отсутствуют!", disable_mentions=1)
@@ -4102,7 +3948,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['rnick', 'removenick', 'clearnick', 'cnick', 'рник', 'удалитьник', 'снятьник']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4128,7 +3974,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getacc', 'acc', 'гетакк', 'аккаунт', 'account']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4148,7 +3994,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getnick', 'gnick', 'гник', 'гетник']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4171,7 +4017,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['никлист', 'ники', 'всеники', 'nlist', 'nickslist', 'nicklist', 'nicks']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4192,7 +4038,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['nonick', 'nonicks', 'nonicklist', 'nolist', 'nnlist', 'безников', 'ноникс']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4212,7 +4058,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['kick', 'кик', 'исключить']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4266,14 +4112,14 @@ async def on_chat_message(message: Message):
             await rnick(user, chat_id)
             await roleG(user, chat_id, 0)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
             return True
 
         if command in ['vig', 'выг']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4294,7 +4140,7 @@ async def on_chat_message(message: Message):
             if await equals_roles(user_id, user, chat_id) < 2:
                 await message.reply("⛔️ Вы не можете выдать выговор данному пользователю!", disable_mentions=1)
                 return True
-            if await get_role(user, chat_id) < 1:
+            if await get_role_cached(user, chat_id) < 1:
                 await message.reply('⛔️ Операция невозможна! Данный пользователь не является модератором')
                 return True
             reason = get_string(arguments, arg)
@@ -4321,7 +4167,7 @@ async def on_chat_message(message: Message):
             await add_punishment(chat_id, user_id)
 
         if command in ['unvig', 'унвыг', 'анвыг', 'снятьвыг', 'минусвыг']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4339,7 +4185,7 @@ async def on_chat_message(message: Message):
             if await get_vig(user, chat_id) < 1:
                 await message.reply("У пользователя нет выговоров!")
                 return True
-            if await get_role(user, chat_id) < 1:
+            if await get_role_cached(user, chat_id) < 1:
                 await message.reply('Операция невозможна! Данный пользователь не является модератором')
                 return True
             warns = await unvig(chat_id, user)
@@ -4351,7 +4197,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getvig', 'gvig', 'getvig', 'гетвыг', 'гвыг']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4365,7 +4211,7 @@ async def on_chat_message(message: Message):
             else:
                 await message.reply("⛔️ Вы не указали @пользователя!", disable_mentions=1)
                 return True
-            if await get_role(user, chat_id) < 1:
+            if await get_role_cached(user, chat_id) < 1:
                 await message.reply('⛔️ Операция невозможна! Данный пользователь не является модератором')
                 return True
             if await equals_roles(user_id, user, chat_id) < 2:
@@ -4388,7 +4234,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['warn', 'пред', 'варн', 'pred', 'предупреждение']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4458,7 +4304,7 @@ async def on_chat_message(message: Message):
                                          disable_mentions=1)
                 await clear_warns(chat_id, user)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -4466,7 +4312,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unwarn', 'унварн', 'анварн', 'снятьпред', 'минуспред']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4493,7 +4339,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getwarn', 'gwarn', 'getwarns', 'гетварн', 'гварн']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4527,7 +4373,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['say']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4544,7 +4390,7 @@ async def on_chat_message(message: Message):
             await message.answer(top_10)
 
         if command in ['warnhistory', 'historywarns', 'whistory', 'историяварнов', 'историяпредов']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4577,7 +4423,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['warnlist', 'warns', 'wlist', 'варны', 'варнлист']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4593,7 +4439,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['viglist', 'vigl', 'vlist', 'выги', 'выглист']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4611,7 +4457,7 @@ async def on_chat_message(message: Message):
         # Пропускаем дубликат команды /staff - он ниже
 
         if command in ['reg', 'registration', 'regdate', 'рег', 'регистрация', 'датарегистрации']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4659,7 +4505,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['mute', 'мут', 'мьют', 'муте', 'addmute']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4770,7 +4616,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unmute', 'снятьмут', 'анмут', 'анмьют', 'унмут']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4804,7 +4650,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getmute', 'gmute', 'гмут', 'гетмут', 'чекмут']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4855,7 +4701,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['mutelist', 'mutes', 'муты', 'мутлист']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4874,7 +4720,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['clear', 'чистка', 'очистить', 'очистка']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -4902,8 +4748,7 @@ async def on_chat_message(message: Message):
             target_id = user_id
             
             # Проверяем, не является ли пользователь владельцем чата
-            sql.execute("SELECT owner_id FROM chats WHERE chat_id = ?", (chat_id,))
-            chat_owner = sql.fetchone()
+            chat_owner = await db.fetchone('SELECT owner_id FROM chats WHERE chat_id = $1', chat_id,)
             
             if chat_owner and chat_owner[0] == target_id:
                 await message.reply("❌ Вы не можете покинуть чат, так как являетесь владельцем! Передайте права через /editowner", disable_mentions=1)
@@ -5094,7 +4939,7 @@ async def on_chat_message(message: Message):
                     '/gmanager — выдать права Специального Руководителя'
                 ],
             }
-            user_role = await get_role(user_id, chat_id) or 0
+            user_role = await get_role_cached(user_id, chat_id) or 0
             commands = []
             for i in commands_levels.keys():
                 if i <= user_role:
@@ -5276,7 +5121,7 @@ async def on_chat_message(message: Message):
                     '/gmanager — выдать права Специального Руководителя',
                 ],
             }
-            user_role = await get_role(user_id, chat_id)
+            user_role = await get_role_cached(user_id, chat_id)
             commands = []
             for i in commands_levels.keys():
                 if i <= user_role:
@@ -5287,7 +5132,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['pin', 'закрепить']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5302,7 +5147,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['rename']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5316,7 +5161,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unpin', 'открепить']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5329,7 +5174,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['getban', 'чекбан', 'гетбан', 'checkban']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5395,7 +5240,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['staff', 'стафф']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5432,8 +5277,8 @@ async def on_chat_message(message: Message):
         if command in ['gstaff', 'гстафф']:
             # Создаём таблицу если не существует
             try:
-                sql.execute("CREATE TABLE IF NOT EXISTS global_managers (user_id BIGINT PRIMARY KEY, level BIGINT)")
-                database.commit()
+                await db.execute("CREATE TABLE IF NOT EXISTS global_managers (user_id BIGINT PRIMARY KEY, level BIGINT)")
+                pass
             except:
                 pass
             
@@ -5442,15 +5287,14 @@ async def on_chat_message(message: Message):
             
             # Автоматически добавляем Разработчика если его нет
             for dev_id in allowed_dev_ids:
-                sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (dev_id,))
-                if not sql.fetchone():
-                    sql.execute("INSERT INTO global_managers (user_id, level) VALUES (?, ?)", (dev_id, 11))
-                    database.commit()
+                if not await db.fetchone("SELECT level FROM global_managers WHERE user_id = $1", (dev_id,)):
+
+                    await db.execute("INSERT INTO global_managers (user_id, level) VALUES ($1, $2)", (dev_id, 11))
+                    pass
                     print(f"✅ Добавлен Разработчик {dev_id} в global_managers")
             
             # Проверка прав - быть Разработчиком ИЛИ иметь роль >= 9
-            sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (user_id,))
-            global_role_result = sql.fetchone()
+            global_role_result = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', user_id,)
             
             has_permission = user_id in allowed_dev_ids
             if not has_permission and global_role_result and global_role_result[0] >= 8:
@@ -5461,9 +5305,8 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем ВСЕХ глобальных менеджеров с ролью >= 8
-            sql.execute("SELECT user_id, level FROM global_managers WHERE level >= 8 ORDER BY level DESC")
-            global_managers = sql.fetchall()
-            
+            global_managers = await db.fetchall("SELECT user_id, level FROM global_managers WHERE level >= 8 ORDER BY level DESC")
+
             print(f"DEBUG gstaff: Найдено {len(global_managers)} пользователей")
 
             # Группируем по уровням
@@ -5499,7 +5342,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['gcheckban', 'гчекбан', 'ггетбан', 'ggetban']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("❌ Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5585,7 +5428,7 @@ async def on_chat_message(message: Message):
 
         # банчик
         if command in ['ban', 'бан', 'блокировка']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5695,7 +5538,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['dban', 'дбан', 'дблокировка']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 9:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5744,7 +5587,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unban', 'унбан', 'снятьбан']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5774,7 +5617,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addzamspec', 'zamspec', 'замспец', 'зса']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5796,7 +5639,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Заместителя специального администратора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -5804,7 +5647,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addspec', 'spec', 'са', 'addspecadm', 'addspecadmin']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 7:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5826,7 +5669,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Специального администратора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -5834,7 +5677,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addchatowner', 'chatowner']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5856,7 +5699,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Владельца беседы {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -5864,7 +5707,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['mstats', 'мстатс', 'мстатистика', 'moderstats']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 1:
                 await message.reply("❌ Недостаточно прав! Команда доступна только модераторам и выше.",
                                     disable_mentions=1)
@@ -5878,8 +5721,8 @@ async def on_chat_message(message: Message):
                 target_id = await getID(arguments[1])
                 if target_id:
                     # Проверяем, может ли пользователь смотреть статистику другого модератора
-                    caller_role = await get_role(user_id, chat_id)
-                    target_role = await get_role(target_id, chat_id)
+                    caller_role = await get_role_cached(user_id, chat_id)
+                    target_role = await get_role_cached(target_id, chat_id)
 
                     # Модератор (роль 1) может смотреть только свою статистику
                     if caller_role == 1 and target_id != user_id:
@@ -5916,7 +5759,7 @@ async def on_chat_message(message: Message):
 
             # Получаем информацию о пользователе
             user_info = await get_user_or_group_name(target_user)
-            role = await get_role(target_user, chat_id)
+            role = await get_role_cached(target_user, chat_id)
             roles = {0: "Пользователь", 1: "Модератор", 2: "Старший модератор", 3: "Администратор",
                      4: "Старший администратор", 5: "Заместитель специального администратора",
                      6: "Специальный администратор",
@@ -5945,7 +5788,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addmoder', 'moder', 'модер']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5967,7 +5810,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Модератора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -5975,7 +5818,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['removerole', 'rrole', 'рроле', 'участник', 'снятьроль']:
-            user_role_check = await get_role(user_id, chat_id)
+            user_role_check = await get_role_cached(user_id, chat_id)
             if user_role_check is None or user_role_check < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -5997,7 +5840,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} забрал(-а) роль у {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -6005,7 +5848,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['zov', 'зов', 'вызов']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             reason = get_string(arguments, 1)
@@ -6028,7 +5871,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['ozov', 'online', 'озов']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             reason = get_string(arguments, 1)
@@ -6052,7 +5895,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['onlinelist', 'olist', 'олист']:
-            if await get_role(user_id, chat_id) < 2:
+            if await get_role_cached(user_id, chat_id) < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             users = await bot.api.messages.get_conversation_members(peer_id=message.peer_id,
@@ -6086,7 +5929,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['banlist', 'bans', 'банлист', 'баны']:
-            if await get_role(user_id, chat_id) < 2:
+            if await get_role_cached(user_id, chat_id) < 2:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             bans = await banlist(chat_id)
@@ -6103,7 +5946,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['gbanlist', 'gbans', 'гбанлист', 'гбаны']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             gbans = await gbanlist()
@@ -6120,7 +5963,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['logsrole']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             gbans = await logsrolelist()
@@ -6137,7 +5980,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['delete', 'удалить']:
-            if await get_role(user_id, chat_id) < 1:
+            if await get_role_cached(user_id, chat_id) < 1:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             if not message.reply_message:
@@ -6161,7 +6004,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['mkick', 'мкик', 'masskick']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             if len(arguments) <= 1:
@@ -6171,7 +6014,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Не более 30 пользователей!", disable_mentions=1)
                 return True
             if arguments[1] in ['all', 'все']:
-                if await get_role(user_id, chat_id) < 5:
+                if await get_role_cached(user_id, chat_id) < 5:
                     await message.reply("Недостаточно прав!", disable_mentions=1)
                     return True
                 users = await bot.api.messages.get_conversation_members(peer_id=message.peer_id,
@@ -6180,7 +6023,7 @@ async def on_chat_message(message: Message):
                 user_f = []
                 gi = 0
                 for i in users["profiles"]:
-                    if not i['id'] == user_id and await get_role(i['id'], chat_id) <= 0:
+                    if not i['id'] == user_id and await get_role_cached(i['id'], chat_id) <= 0:
                         await bot.api.messages.remove_chat_user(chat_id, int(i['id']))
                 user_display = await get_user_or_group_mention(user_id)
                 await message.answer(
@@ -6216,7 +6059,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} исключил пользователей: {kick_users}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
@@ -6224,7 +6067,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ["clearchat", "удалитьчат"]:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.reply('Недостаточно прав!')
                 return True
             if len(arguments) < 2:
@@ -6243,15 +6086,15 @@ async def on_chat_message(message: Message):
                     f"Чат удален из базы данных бота! Работа бота в чате прекращена."
                 )
             )
-            sql.execute("DELETE FROM chats WHERE chat_id = ?", (target_chat,))
-            database.commit()
+            await db.execute("DELETE FROM chats WHERE chat_id = $1", (target_chat,))
+            pass
             user_display = await get_user_or_group_mention(user_id)
             await message.reply(
                 f"{user_display} удалил(-а) беседу №«{target_chat}»")
             return True
 
         if command in ['quiet', 'silence', 'тишина']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             silence = await quiet(chat_id)
@@ -6265,7 +6108,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['чаты', 'chatlist']:
-            if await get_role(user_id, chat_id) < 9:
+            if await get_role_cached(user_id, chat_id) < 9:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             chatlist = await gpull_id()
@@ -6286,7 +6129,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['infoid', 'инфоайди', 'чатыпользователя', 'инфоид']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.replyLocalizedMessage('Недостаточно прав')
                 return True
             if len(arguments) < 2:
@@ -6296,8 +6139,7 @@ async def on_chat_message(message: Message):
             if not target:
                 await message.reply("Не удалось определить пользователя.", disable_mentions=1)
                 return True
-            sql.execute("SELECT chat_id FROM chats WHERE owner_id = ?", (target,))
-            user_chats = sql.fetchall()
+            user_chats = await db.fetchall('SELECT chat_id FROM chats WHERE owner_id = $1', target,)
             if not user_chats:
                 await message.reply("У пользователя нет зарегистрированных бесед.", disable_mentions=1)
                 return True
@@ -6330,7 +6172,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['skick', 'снят', 'скик']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6391,14 +6233,14 @@ async def on_chat_message(message: Message):
                 f"{user_display} исключил(-а) {target_display} в сетке бесед",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['sban', 'сбан']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6468,14 +6310,14 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['sunban', 'санбан', 'сунбан']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6505,7 +6347,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} разблокировал(-а) {target_display} в сетке бесед")
 
         if command in ['gskick', 'гснят', 'гскик']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6565,14 +6407,14 @@ async def on_chat_message(message: Message):
                 f"{user_display} исключил(-а) {target_display} в глобальной сетке бесед",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['gsban', 'гсбан']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6641,14 +6483,14 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['gsunban', 'гсанбан', 'гсунбан']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6678,7 +6520,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} разблокировал(-а) {target_display} в глобальной сетке бесед")
 
         if command in ['addstmoder', 'stmoder', 'стмодер']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6702,14 +6544,14 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Cтаршего модератора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['rnickall', 'allrnick', 'arnick', 'mrnick']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6719,7 +6561,7 @@ async def on_chat_message(message: Message):
                                  disable_mentions=1)
 
         if command in ['sremovenick', 'srnick']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6750,7 +6592,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['gsremovenick', 'gsrnick']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6781,7 +6623,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['addstadmin', 'stadmin', 'стадмин']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6805,14 +6647,14 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Старшего администратора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['addadmin', 'admin', 'админ']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6836,14 +6678,14 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) права Администратора {target_display}",
                 disable_mentions=1)
             await add_punishment(chat_id, user_id)
-            if await get_sliv(user_id, chat_id) and await get_role(user_id, chat_id) < 5:
+            if await get_sliv(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 5:
                 await roleG(user_id, chat_id, 0)
                 user_display = await get_user_or_group_mention(user_id)
                 await message.reply(
                     f"❗️ Уровень прав {user_display} был снят из-за подозрений в сливе беседы\n\n{await staff_zov(chat_id)}")
 
         if command in ['gserverinfo', 'gserveri']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6870,7 +6712,7 @@ async def on_chat_message(message: Message):
             chat_titles_string = ''
 
         if command in ['serverinfo', 'serveri']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             pull = await get_pull_chats(chat_id)
@@ -6896,7 +6738,7 @@ async def on_chat_message(message: Message):
             chat_titles_string = ''
 
         if command in ['demote', 'расформ беседы']:
-            if await get_role(user_id, chat_id) < 7:
+            if await get_role_cached(user_id, chat_id) < 7:
                 await message.reply("Недостаточно рав!", disable_mentions=1)
                 return True
 
@@ -6912,7 +6754,7 @@ async def on_chat_message(message: Message):
             users = json.loads(users.json())
 
             for i in users["profiles"]:
-                if not i['id'] == user_id and await get_role(i['id'], chat_id) < 7:
+                if not i['id'] == user_id and await get_role_cached(i['id'], chat_id) < 7:
                     try:
                         await bot.api.messages.remove_chat_user(chat_id, i['id'])
                     except:
@@ -6924,7 +6766,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['banwords', 'bws', 'банворды']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6948,7 +6790,7 @@ async def on_chat_message(message: Message):
                         f"{user_display} добавил(-а) слово в список запрещенных")
 
         if command in ['filter']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -6966,7 +6808,7 @@ async def on_chat_message(message: Message):
                     disable_mentions=1)
 
         if command in ['sremoverole', 'srrole']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7000,7 +6842,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} забрал(-а) роль у {target_display} в сетке бесед",
                 disable_mentions=1)
         if command in ['gsremoverole', 'gsrrole']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7035,7 +6877,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['antiflood', 'af']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7053,7 +6895,7 @@ async def on_chat_message(message: Message):
                     disable_mentions=1)
 
         if command in ['welcome', 'welcometext', 'wtext']:
-            if await get_role(user_id, chat_id) < 7:
+            if await get_role_cached(user_id, chat_id) < 7:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7069,7 +6911,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} изменил(-а) приветствие в беседе")
 
         if command in ['setrules']:
-            if await get_role(user_id, chat_id) < 7:
+            if await get_role_cached(user_id, chat_id) < 7:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7085,7 +6927,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} изменил(-а) правила в беседе")
 
         if command in ['setinfo']:
-            if await get_role(user_id, chat_id) < 7:
+            if await get_role_cached(user_id, chat_id) < 7:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7119,7 +6961,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Инфо в беседе не установлен!")
 
         if command in ['invite']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7133,7 +6975,7 @@ async def on_chat_message(message: Message):
                     f"{user_display} выключил(-а) функцию приглашения модераторами")
 
         if command in ['leave']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7150,8 +6992,7 @@ async def on_chat_message(message: Message):
             # Проверка прав - нужна глобальная роль >= 9 или Разработчик
             allowed_ids = [574393629, 597064735]
 
-            sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (user_id,))
-            global_role = sql.fetchone()
+            global_role = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', user_id,)
             has_permission = global_role and global_role[0] >= 9
             is_dev = user_id in allowed_ids
             
@@ -7174,8 +7015,7 @@ async def on_chat_message(message: Message):
                 return True
 
             # Проверка - у пользователя должна быть глобальная роль 8+
-            sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (user,))
-            target_global_role = sql.fetchone()
+            target_global_role = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', user,)
             
             if not target_global_role or target_global_role[0] < 8:
                 await message.reply("⛔️ У пользователя нет глобальной роли!", disable_mentions=1)
@@ -7258,8 +7098,7 @@ async def on_chat_message(message: Message):
                 target_user = await getID(arguments[1])
 
             # Проверка глобальной роли напрямую из БД
-            sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (target_user,))
-            global_fetch = sql.fetchone()
+            global_fetch = await db.fetchone('SELECT level FROM global_managers WHERE user_id = $1', target_user,)
             
             if not global_fetch or global_fetch[0] != 11:
                 await message.reply("У пользователя нет прав разработчика!", disable_mentions=1)
@@ -7282,7 +7121,7 @@ async def on_chat_message(message: Message):
         
         # Заместитель Руководителя (уровень 8) - команда /gzammanager
         if command in ['gzammanager']:
-            if (await get_role(user_id, chat_id) or 0) < 10:
+            if (await get_role_cached(user_id, chat_id) or 0) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7305,7 +7144,7 @@ async def on_chat_message(message: Message):
 
         # Основной Заместитель Руководителя (уровень 9) - команда /goszammanager
         if command in ['goszammanager']:
-            if (await get_role(user_id, chat_id) or 0) < 10:
+            if (await get_role_cached(user_id, chat_id) or 0) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7352,7 +7191,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['gserver', 'setgserver']:
-            if await get_role(user_id, chat_id) < 6:
+            if await get_role_cached(user_id, chat_id) < 6:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7380,7 +7219,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} привязал беседу к глобальному серверу!")
 
         if command in ['server', 'setserver']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7427,7 +7266,7 @@ async def on_chat_message(message: Message):
                     pass
 
         if command in ['createall']:
-            if (await get_role(user_id, chat_id) < 10):
+            if (await get_role_cached(user_id, chat_id) < 10):
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             peer_ids = await get_all_peerids()
@@ -7435,9 +7274,9 @@ async def on_chat_message(message: Message):
                 try:
                     if i > 2000000000:
                         i = i - 2000000000
-                    sql.execute(
+                    await db.execute(
                         f"CREATE TABLE IF NOT EXISTS vighistory_{i} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-                    sql.execute(
+                    await db.execute(
                         f"CREATE TABLE IF NOT EXISTS vig_{i} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
 
                 except:
@@ -7464,7 +7303,6 @@ async def on_chat_message(message: Message):
                     f"Пользователь {user_display} был исключен из конференции.\nПричина: Собственное желание",
                     attachment='audio-2001815713_128815713', disable_mentions=1)
 
-
             except VKAPIError as e:
                 if e.code == 15:  # Access denied (нет прав у бота)
                     await message.reply(
@@ -7479,7 +7317,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['szov', 'serverzov', 'сзов']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7508,7 +7346,7 @@ async def on_chat_message(message: Message):
                                             random_id=0)
 
         if command in ['gszov', 'gserverzov', 'гсзов']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7537,7 +7375,7 @@ async def on_chat_message(message: Message):
                                             random_id=0)
 
         if command in ['gban', 'гбан', 'глобалбан']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7599,7 +7437,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['ungban', 'унгбан', 'гунбан', 'gunban']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7641,7 +7479,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['zunban']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7700,12 +7538,11 @@ async def on_chat_message(message: Message):
         # ========== Команды для Заместителя Руководителя (уровень 8) ==========
         # Список глобальных блокировок
         if command in ['gbanlist', 'гбанлист']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM gbanlist ORDER BY rowid DESC")
-            fetch = sql.fetchall()
+            fetch = await db.fetchall("SELECT * FROM gbanlist ORDER BY rowid DESC")
 
             if not fetch:
                 await message.reply("Список глобальных блокировок пуст!", disable_mentions=1)
@@ -7760,7 +7597,7 @@ async def on_chat_message(message: Message):
 
             # ПРОВЕРКА VIP СТАТУСА
 
-            role = await get_role(user, chat_id) or 0
+            role = await get_role_cached(user, chat_id) or 0
             warns = await get_warns(user, chat_id)
             if await is_nick(user, chat_id):
                 nick = await get_user_nam(user, chat_id)
@@ -7806,16 +7643,14 @@ async def on_chat_message(message: Message):
             table_name = f"bans_{chat_id}"
 
             # Проверяем структуру таблицы
-            sql.execute(f"PRAGMA table_info({table_name})")
-            columns = sql.fetchall()
+            columns = await db.fetchall(f"PRAGMA table_info({table_name})")
 
             result = f"Структура таблицы {table_name}:\n"
             for col in columns:
                 result += f"  {col[1]} ({col[2]})\n"
 
             # Проверяем последний бан
-            sql.execute(f"SELECT * FROM {table_name} ORDER BY date DESC LIMIT 1")
-            last_ban = sql.fetchone()
+            last_ban = await db.fetchone(f"SELECT * FROM {table_name} ORDER BY date DESC LIMIT 1")
 
             if last_ban:
                 result += f"\nПоследний бан:\n"
@@ -7837,18 +7672,17 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ["infochat", "инфочат"]:
-            if (await get_role(user_id, chat_id) or 0) < 10:
+            if (await get_role_cached(user_id, chat_id) or 0) < 10:
                 await message.reply('Недостаочно прав!')
                 return True
 
         # Черный список бота
         if command in ['blacklist', 'черныйсписок', 'ЧСБ']:
-            if await get_role(user_id, chat_id) < 8:
+            if await get_role_cached(user_id, chat_id) < 8:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM blacklist ORDER BY rowid DESC")
-            fetch = sql.fetchall()
+            fetch = await db.fetchall("SELECT * FROM blacklist ORDER BY rowid DESC")
 
             if not fetch:
                 await message.reply("Черный список бота пуст!", disable_mentions=1)
@@ -7876,7 +7710,7 @@ async def on_chat_message(message: Message):
         # ========== Команды для Основного Заместителя Руководителя (уровень 12) ==========
         # Установить владельца беседы
         if command in ['setowner', 'установитьвладельца']:
-            if await get_role(user_id, chat_id) < 12:
+            if await get_role_cached(user_id, chat_id) < 12:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7906,7 +7740,7 @@ async def on_chat_message(message: Message):
         # ========== Команды для Специального Руководителя (уровень 10) ==========
         # Рассылка по категориям бесед
         if command in ['sayall', 'news']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7929,7 +7763,7 @@ async def on_chat_message(message: Message):
 
         # Вызов всех участников в глобальном сервере
         if command in ['gzov', 'гзов']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7939,9 +7773,8 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем ВСЕ чаты где есть бот
-            sql.execute("SELECT chat_id FROM chats")
-            all_chats = sql.fetchall()
-            
+            all_chats = await db.fetchall("SELECT chat_id FROM chats")
+
             if not all_chats:
                 await message.reply("Бот не активирован ни в одном чате!", disable_mentions=1)
                 return True
@@ -7976,7 +7809,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['infoid', 'инфоайди']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -7989,8 +7822,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Не удалось определить пользователя.", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT chat_id FROM chats WHERE owner_id = ?", (target,))
-            user_chats = sql.fetchall()
+            user_chats = await db.fetchall('SELECT chat_id FROM chats WHERE owner_id = $1', target,)
 
             if not user_chats:
                 await message.reply("У пользователя нет зарегистрированных бесед.", disable_mentions=1)
@@ -8018,7 +7850,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['banid', 'банпоайди']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8055,7 +7887,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unbanid', 'унбанпоайди']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8087,7 +7919,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['say', 'сказать']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8106,7 +7938,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addblack', 'добавитьвчерныйсписок']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8119,8 +7951,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM blacklist WHERE user_id = ?", (user,))
-            check = sql.fetchone()
+            check = await db.fetchone('SELECT * FROM blacklist WHERE user_id = $1', user,)
             if check:
                 await message.reply("Пользователь уже в черном списке!", disable_mentions=1)
                 return True
@@ -8128,9 +7959,9 @@ async def on_chat_message(message: Message):
             reason = get_string(arguments, 1) if len(arguments) > 1 else "Добавлен в ЧСБ"
             date_now = str(moscow_now()).split('.')[0]
 
-            sql.execute("INSERT INTO blacklist (user_id, moderator_id, reason, datetime) VALUES (?, ?, ?, ?)",
+            await db.execute("INSERT INTO blacklist (user_id, moderator_id, reason, datetime) VALUES ($1, $2, $3, $4)",
                         (user, user_id, reason, date_now))
-            database.commit()
+            pass
 
             all_peer_ids = await get_all_peerids()
             kicked_count = 0
@@ -8151,7 +7982,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['unblack', 'удалитьизчерногосписка']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8164,20 +7995,19 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM blacklist WHERE user_id = ?", (user,))
-            check = sql.fetchone()
+            check = await db.fetchone('SELECT * FROM blacklist WHERE user_id = $1', user,)
             if not check:
                 await message.reply("Пользователь не в черном списке!", disable_mentions=1)
                 return True
 
-            sql.execute("DELETE FROM blacklist WHERE user_id = ?", (user,))
-            database.commit()
+            await db.execute("DELETE FROM blacklist WHERE user_id = $1", (user,))
+            pass
 
             await message.reply(f"Пользователь удален из черного списка бота!", disable_mentions=1)
             return True
 
         if command in ['clearchat', 'удалитьчат']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8201,15 +8031,15 @@ async def on_chat_message(message: Message):
             except:
                 pass
 
-            sql.execute("DELETE FROM chats WHERE chat_id = ?", (target_chat,))
-            database.commit()
+            await db.execute("DELETE FROM chats WHERE chat_id = $1", (target_chat,))
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             await message.reply(f"{user_display} удалил(-а) чат №{target_chat} из базы данных", disable_mentions=1)
             return True
 
         if command in ['delchat', 'удалитьизбд']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8224,21 +8054,20 @@ async def on_chat_message(message: Message):
                 return True
 
             # Добавляем в banschats чтобы бот не активировался
-            sql.execute("INSERT INTO banschats (chat_id) VALUES (?)", (target_chat,))
-            sql.execute("DELETE FROM chats WHERE chat_id = ?", (target_chat,))
-            database.commit()
+            await db.execute("INSERT INTO banschats (chat_id) VALUES ($1)", (target_chat,))
+            await db.execute("DELETE FROM chats WHERE chat_id = $1", (target_chat,))
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             await message.reply(f"{user_display} удалил(-а) чат №{target_chat} из базы данных и заблокировал активацию", disable_mentions=1)
             return True
 
         if command in ['listchats', 'списочатов']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT chat_id FROM chats")
-            chats = sql.fetchall()
+            chats = await db.fetchall("SELECT chat_id FROM chats")
 
             if not chats:
                 await message.reply("Нет зарегистрированных чатов!", disable_mentions=1)
@@ -8265,7 +8094,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['infochat', 'инфочат']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8279,8 +8108,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Неверный chat_id!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM chats WHERE chat_id = ?", (target_chat,))
-            chat_data = sql.fetchone()
+            chat_data = await db.fetchone('SELECT * FROM chats WHERE chat_id = $1', target_chat,)
 
             if not chat_data:
                 await message.reply("Чат не найден в базе данных!", disable_mentions=1)
@@ -8296,12 +8124,11 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['banwords', 'банворды', 'запрещенныеслова']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
-            sql.execute(f"SELECT * FROM banwords_{chat_id}")
-            banwords = sql.fetchall()
+            banwords = await db.fetchall(f"SELECT * FROM banwords_{chat_id}")
 
             if not banwords:
                 await message.reply("Список запрещенных слов пуст!", disable_mentions=1)
@@ -8312,7 +8139,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['addbanwords', 'добавитьбанворд']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8321,21 +8148,20 @@ async def on_chat_message(message: Message):
                 return True
 
             word = arguments[1].lower()
-            sql.execute(f"SELECT * FROM banwords_{chat_id} WHERE banword = ?", (word,))
-            check = sql.fetchone()
+            check = await db.fetchone(f"SELECT * FROM banwords_{chat_id} WHERE banword = $1", (word,))
 
             if check:
                 await message.reply("Это слово уже в списке!", disable_mentions=1)
                 return True
 
-            sql.execute(f"INSERT INTO banwords_{chat_id} VALUES (?)", (word,))
-            database.commit()
+            await db.execute(f"INSERT INTO banwords_{chat_id} VALUES ($1)", (word,))
+            pass
 
             await message.reply(f"Слово «{word}» добавлено в список запрещенных!", disable_mentions=1)
             return True
 
         if command in ['removebanwords', 'удалитьбанворд']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8344,21 +8170,20 @@ async def on_chat_message(message: Message):
                 return True
 
             word = arguments[1].lower()
-            sql.execute(f"SELECT * FROM banwords_{chat_id} WHERE banword = ?", (word,))
-            check = sql.fetchone()
+            check = await db.fetchone(f"SELECT * FROM banwords_{chat_id} WHERE banword = $1", (word,))
 
             if not check:
                 await message.reply("Это слово не в списке!", disable_mentions=1)
                 return True
 
-            sql.execute(f"DELETE FROM banwords_{chat_id} WHERE banword = ?", (word,))
-            database.commit()
+            await db.execute(f"DELETE FROM banwords_{chat_id} WHERE banword = $1", (word,))
+            pass
 
             await message.reply(f"Слово «{word}» удалено из списка запрещенных!", disable_mentions=1)
             return True
 
         if command in ['give', 'выдать', 'монеты']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8389,17 +8214,16 @@ async def on_chat_message(message: Message):
                 await message.reply("Сумма должна быть больше 0!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM balance WHERE user_id = ?", (user,))
-            balance = sql.fetchone()
+            balance = await db.fetchone('SELECT * FROM balance WHERE user_id = $1', user,)
 
             if balance:
                 new_balance = balance[1] + amount
-                sql.execute("UPDATE balance SET money = ? WHERE user_id = ?", (new_balance, user))
+                await db.execute("UPDATE balance SET money = $1 WHERE user_id = $2", (new_balance, user))
             else:
-                sql.execute("INSERT INTO balance (user_id, money, blago, bank) VALUES (?, ?, ?, ?)",
+                await db.execute("INSERT INTO balance (user_id, money, blago, bank) VALUES ($1, $2, $3, $4)",
                             (user, amount, 0, 0))
 
-            database.commit()
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             target_display = await get_user_or_group_mention(user)
@@ -8410,7 +8234,7 @@ async def on_chat_message(message: Message):
 
         # Выдать монеты в банк (уровень 10+)
         if command in ['выдатьбанк', 'givebank']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8441,17 +8265,16 @@ async def on_chat_message(message: Message):
                 await message.reply("Сумма должна быть больше 0!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM balance WHERE user_id = ?", (user,))
-            balance = sql.fetchone()
+            balance = await db.fetchone('SELECT * FROM balance WHERE user_id = $1', user,)
 
             if balance:
                 new_bank = balance[3] + amount
-                sql.execute("UPDATE balance SET bank = ? WHERE user_id = ?", (new_bank, user))
+                await db.execute("UPDATE balance SET bank = $1 WHERE user_id = $2", (new_bank, user))
             else:
-                sql.execute("INSERT INTO balance (user_id, money, blago, bank) VALUES (?, ?, ?, ?)",
+                await db.execute("INSERT INTO balance (user_id, money, blago, bank) VALUES ($1, $2, $3, $4)",
                             (user, 0, 0, amount))
 
-            database.commit()
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             target_display = await get_user_or_group_mention(user)
@@ -8462,7 +8285,7 @@ async def on_chat_message(message: Message):
 
         # Выдать VIP (уровень 10+)
         if command in ['выдатьвип', 'givevip']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8494,20 +8317,19 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем текущий VIP статус
-            sql.execute("SELECT * FROM vip_status WHERE user_id = ?", (user,))
-            vip = sql.fetchone()
+            vip = await db.fetchone('SELECT * FROM vip_status WHERE user_id = $1', user,)
 
             current_time = int(time.time())
             if vip:
                 # Если уже есть VIP, добавляем дни к текущему сроку
                 new_expire = max(vip[1], current_time) + (days * 86400)
-                sql.execute("UPDATE vip_status SET expire_time = ? WHERE user_id = ?", (new_expire, user))
+                await db.execute("UPDATE vip_status SET expire_time = $1 WHERE user_id = $2", (new_expire, user))
             else:
                 # Если нет VIP, создаём новую запись
                 new_expire = current_time + (days * 86400)
-                sql.execute("INSERT INTO vip_status (user_id, expire_time) VALUES (?, ?)", (user, new_expire))
+                await db.execute("INSERT INTO vip_status (user_id, expire_time) VALUES ($1, $2)", (user, new_expire))
 
-            database.commit()
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             target_display = await get_user_or_group_mention(user)
@@ -8518,7 +8340,7 @@ async def on_chat_message(message: Message):
 
         # Выдать дом (уровень 10+)
         if command in ['выдатьдом', 'givehouse']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8551,16 +8373,16 @@ async def on_chat_message(message: Message):
                 return True
 
             # Проверяем, есть ли уже такой дом у пользователя
-            sql.execute("SELECT id FROM houses WHERE user_id = ? AND house_id = ?", (user, house_id))
-            if sql.fetchone():
+            if await db.fetchone("SELECT id FROM houses WHERE user_id = $1 AND house_id = $2", (user, house_id)):
+
                 await message.reply(f"❌ У пользователя уже есть этот дом!", disable_mentions=1)
                 return True
 
             # Добавляем дом пользователю
             current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-            sql.execute("INSERT INTO houses (user_id, house_id, purchase_date) VALUES (?, ?, ?)",
+            await db.execute("INSERT INTO houses (user_id, house_id, purchase_date) VALUES ($1, $2, $3)",
                         (user, house_id, current_time))
-            database.commit()
+            pass
 
             house_name = HOUSES_DATA[house_id]['name']
             user_display = await get_user_or_group_mention(user_id)
@@ -8572,7 +8394,7 @@ async def on_chat_message(message: Message):
 
         # Выдать машину (уровень 10+)
         if command in ['выдатьмашину', 'givecar']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8605,16 +8427,16 @@ async def on_chat_message(message: Message):
                 return True
 
             # Проверяем, есть ли уже такая машина у пользователя
-            sql.execute("SELECT id FROM cars WHERE user_id = ? AND car_id = ?", (user, car_id))
-            if sql.fetchone():
+            if await db.fetchone("SELECT id FROM cars WHERE user_id = $1 AND car_id = $2", (user, car_id)):
+
                 await message.reply(f"❌ У пользователя уже есть эта машина!", disable_mentions=1)
                 return True
 
             # Добавляем машину пользователю
             current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-            sql.execute("INSERT INTO cars (user_id, car_id, purchase_date) VALUES (?, ?, ?)",
+            await db.execute("INSERT INTO cars (user_id, car_id, purchase_date) VALUES ($1, $2, $3)",
                         (user, car_id, current_time))
-            database.commit()
+            pass
 
             car_name = CARS_DATA[car_id]['name']
             user_display = await get_user_or_group_mention(user_id)
@@ -8626,7 +8448,7 @@ async def on_chat_message(message: Message):
 
         # Выдать бизнес (уровень 10+)
         if command in ['выдатьбиз', 'givebusiness']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8659,20 +8481,19 @@ async def on_chat_message(message: Message):
                 return True
 
             # Проверяем, есть ли уже у пользователя этот бизнес
-            sql.execute("SELECT * FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user, business_id))
-            existing = sql.fetchone()
+            existing = await db.fetchone('SELECT * FROM user_businesses WHERE user_id = $2 AND biz_id = $1', user, business_id)
 
             if existing:
                 # Увеличиваем количество
-                sql.execute("UPDATE user_businesses SET count = count + 1 WHERE user_id = ? AND biz_id = ?",
+                await db.execute("UPDATE user_businesses SET count = count + 1 WHERE user_id = $1 AND biz_id = $2",
                             (user, business_id))
             else:
                 # Добавляем новый бизнес
                 current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                sql.execute("INSERT INTO user_businesses (user_id, biz_id, count, last_collected, balance) VALUES (?, ?, ?, ?, ?)",
+                await db.execute("INSERT INTO user_businesses (user_id, biz_id, count, last_collected, balance) VALUES ($1, $2, $3, $4, $5)",
                             (user, business_id, 1, current_time, 0))
 
-            database.commit()
+            pass
 
             business_name = BUSINESS_TYPES[business_id]['name']
             user_display = await get_user_or_group_mention(user_id)
@@ -8684,7 +8505,7 @@ async def on_chat_message(message: Message):
 
         # Обнулить монеты пользователя (уровень 10+)
         if command in ['логиэко', 'logeco', 'logeconomy']:
-            role = await get_role(user_id, chat_id)
+            role = await get_role_cached(user_id, chat_id)
             if role < 9:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -8700,10 +8521,10 @@ async def on_chat_message(message: Message):
                         target_id = None
             try:
                 if target_id:
-                    sql.execute("SELECT user_id, target_id, amount, log FROM economy WHERE user_id = ? OR target_id = ? ORDER BY rowid DESC LIMIT 25", (target_id, target_id))
+                    await db.execute("SELECT user_id, target_id, amount, log FROM economy WHERE user_id = $1 OR target_id = $2 ORDER BY rowid DESC LIMIT 25", (target_id, target_id))
                 else:
-                    sql.execute("SELECT user_id, target_id, amount, log FROM economy ORDER BY rowid DESC LIMIT 25")
-                rows = sql.fetchall()
+                    rows = await db.fetchall("SELECT user_id, target_id, amount, log FROM economy ORDER BY rowid DESC LIMIT 25")
+
             except sqlite3.Error as e:
                 await message.reply(f"❌ Не удалось прочитать логи экономики: {e}", disable_mentions=1)
                 return True
@@ -8721,7 +8542,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['обнулить', 'resetbalance', 'сбросбаланса']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8734,13 +8555,12 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            sql.execute("SELECT * FROM balance WHERE user_id = ?", (user,))
-            balance = sql.fetchone()
+            balance = await db.fetchone('SELECT * FROM balance WHERE user_id = $1', user,)
 
             if balance and balance[1] > 0:
                 old_balance = balance[1]
-                sql.execute("UPDATE balance SET money = 0 WHERE user_id = ?", (user,))
-                database.commit()
+                await db.execute("UPDATE balance SET money = 0 WHERE user_id = $1", (user,))
+                pass
                 
                 user_display = await get_user_or_group_mention(user_id)
                 target_display = await get_user_or_group_mention(user)
@@ -8758,7 +8578,7 @@ async def on_chat_message(message: Message):
         # Исправить базу данных бизнесов (уровень 11+)
         if command in ['фиксбиз', 'fixbiz']:
             # Проверка прав (только разработчики, уровень 11+)
-            if await get_role(user_id, chat_id) < 11:
+            if await get_role_cached(user_id, chat_id) < 11:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8777,21 +8597,20 @@ async def on_chat_message(message: Message):
             added_count = 0
             for biz in missing_businesses:
                 try:
-                    sql.execute("SELECT biz_id FROM business_types WHERE biz_id = ?", (biz[0],))
-                    if not sql.fetchone():
-                        sql.execute(
-                            "INSERT INTO business_types (biz_id, name, emoji, price, min_profit, max_profit, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    if not await db.fetchone("SELECT biz_id FROM business_types WHERE biz_id = $1", (biz[0],)):
+
+                        await db.execute(
+                            "INSERT INTO business_types (biz_id, name, emoji, price, min_profit, max_profit, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                             biz
                         )
                         added_count += 1
                 except Exception as e:
                     print(f"Ошибка при добавлении бизнеса {biz[1]}: {e}")
 
-            database.commit()
+            pass
 
             # Проверяем результат
-            sql.execute("SELECT COUNT(*) FROM business_types")
-            count = sql.fetchone()[0]
+            count = await db.fetchone("SELECT COUNT(*) FROM business_types")
 
             await message.reply(
                 f"✅ База данных бизнесов обновлена!\n\n"
@@ -8803,12 +8622,12 @@ async def on_chat_message(message: Message):
 
         # Очистить все блокировки в чате
         if command in ['clearbans', 'очиститьбаны']:
-            if await get_role(user_id, chat_id) < 10:
+            if await get_role_cached(user_id, chat_id) < 10:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
-            sql.execute(f"DELETE FROM bans_{chat_id}")
-            database.commit()
+            await db.execute(f"DELETE FROM bans_{chat_id}")
+            pass
 
             user_display = await get_user_or_group_mention(user_id)
             await message.answer(
@@ -8817,7 +8636,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['editowner', 'owner', 'setowner']:
-            if await get_role(user_id, chat_id) < 7:
+            if await get_role_cached(user_id, chat_id) < 7:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8851,7 +8670,7 @@ async def on_chat_message(message: Message):
                 disable_mentions=1)
 
         if command in ['srole', 'setrole']:
-            if await get_role(user_id, chat_id) < 3:
+            if await get_role_cached(user_id, chat_id) < 3:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8866,7 +8685,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            if await get_role(user_id, chat_id) <= await get_role(user, chat_id): return await message.reply(
+            if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id): return await message.reply(
                 "⛔️ Вы не можете взаимодействовать с данным пользователем!")
 
             if len(arguments) < arg + 1: return await message.reply("Укажите аргументы!")
@@ -8874,7 +8693,7 @@ async def on_chat_message(message: Message):
             if not arguments[arg].isdigit(): return await message.reply("Укажите число!")
 
             level = int(arguments[arg])
-            if level >= await get_role(user_id, chat_id): return await message.reply(
+            if level >= await get_role_cached(user_id, chat_id): return await message.reply(
                 "⛔️ Вы не можете выдать роль, которая выше вашей!")
 
             if level < 0: return await message.reply("Нельзя выдать такую роль!"),
@@ -8909,7 +8728,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['ssnick', 'ссник']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8927,7 +8746,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            if await get_role(user_id, chat_id) <= await get_role(user, chat_id): return await message.reply(
+            if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id): return await message.reply(
                 "⛔️ Вы не можете взаимодействовать с данным пользователем!")
 
             if await get_pull_id(chat_id) == 0: return await message.reply(
@@ -8946,7 +8765,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) ник {new_nick} в сетке бесед пользователю {target_display}")
 
         if command in ['gssnick', 'гссник']:
-            if await get_role(user_id, chat_id) < 5:
+            if await get_role_cached(user_id, chat_id) < 5:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8964,7 +8783,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            if await get_role(user_id, chat_id) <= await get_role(user, chat_id): return await message.reply(
+            if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id): return await message.reply(
                 "⛔️ Вы не можете взаимодействовать с данным пользователем!")
 
             if await get_gpull_id(chat_id) == 0: return await message.reply(
@@ -8983,7 +8802,7 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) ник {new_nick} в глобальной сетке бесед пользователю {target_display}")
 
         if command in ['ssrole', 'prole', 'pullrole']:
-            if await get_role(user_id, chat_id) < 4:
+            if await get_role_cached(user_id, chat_id) < 4:
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
 
@@ -8998,7 +8817,7 @@ async def on_chat_message(message: Message):
                 await message.reply("Укажите пользователя!", disable_mentions=1)
                 return True
 
-            if await get_role(user_id, chat_id) <= await get_role(user, chat_id): return await message.reply(
+            if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id): return await message.reply(
                 "⛔️ Вы не можете взаимодействовать с данным пользователем!")
 
             if len(arguments) < arg + 1: return await message.reply("Укажите аргументы!")
@@ -9006,7 +8825,7 @@ async def on_chat_message(message: Message):
             if not arguments[arg].isdigit(): return await message.reply("Укажите число!")
 
             level = int(arguments[arg])
-            if level >= await get_role(user_id, chat_id): return await message.reply(
+            if level >= await get_role_cached(user_id, chat_id): return await message.reply(
                 "⛔️ Вы не можете выдать роль, которая выше вашей!")
 
             if level < 0: return await message.reply("Нельзя выдать такую роль!")
@@ -9025,23 +8844,22 @@ async def on_chat_message(message: Message):
                 f"{user_display} выдал(-а) уровень прав {level} в сетке бесед пользователю {target_display}")
 
     if command in ['settingsphoto', 'настройкифото']:
-        if await get_role(user_id, chat_id) < 7:
+        if await get_role_cached(user_id, chat_id) < 7:
             await message.reply("Недостаточно прав!", disable_mentions=1)
             return True
 
-        sql.execute("SELECT * FROM photosettings WHERE chat_id = ?", (chat_id,))
-        row = sql.fetchone()
+        row = await db.fetchone('SELECT * FROM photosettings WHERE chat_id = $1', chat_id,)
         if row is None:
-            sql.execute("INSERT INTO photosettings (chat_id, mode) VALUES (?, ?)", (chat_id, 1))
-            database.commit()
+            await db.execute("INSERT INTO photosettings (chat_id, mode) VALUES ($1, $2)", (chat_id, 1))
+            pass
             user_display = await get_user_or_group_mention(user_id)
             await message.reply(
                 f"{user_display}, включил(-а) систему удаления фотографий!",
                 disable_mentions=1)
         else:
             new_mode = 0 if row[1] == 1 else 1
-            sql.execute("UPDATE photosettings SET mode = ? WHERE chat_id = ?", (new_mode, chat_id))
-            database.commit()
+            await db.execute("UPDATE photosettings SET mode = $1 WHERE chat_id = $2", (new_mode, chat_id))
+            pass
             user_display = await get_user_or_group_mention(user_id)
             if new_mode == 0:
                 await message.reply(
@@ -9055,7 +8873,7 @@ async def on_chat_message(message: Message):
         return True
 
     if command in ['gssrole', 'gprole', 'gpullrole']:
-        if await get_role(user_id, chat_id) < 5:
+        if await get_role_cached(user_id, chat_id) < 5:
             await message.reply("Недостаточно прав!", disable_mentions=1)
             return True
 
@@ -9070,7 +8888,7 @@ async def on_chat_message(message: Message):
             await message.reply("Укажите пользователя!", disable_mentions=1)
             return True
 
-        if await get_role(user_id, chat_id) <= await get_role(user, chat_id): return await message.reply(
+        if await get_role_cached(user_id, chat_id) <= await get_role_cached(user, chat_id): return await message.reply(
             "⛔️ Вы не можете взаимодействовать с данным пользователем!")
 
         if len(arguments) < arg + 1: return await message.reply("Укажите аргументы!")
@@ -9078,7 +8896,7 @@ async def on_chat_message(message: Message):
         if not arguments[arg].isdigit(): return await message.reply("Укажите число!")
 
         level = int(arguments[arg])
-        if level >= await get_role(user_id, chat_id): return await message.reply(
+        if level >= await get_role_cached(user_id, chat_id): return await message.reply(
             "⛔️ Вы не можете выдать роль, которая выше вашей!")
 
         if level < 0: return await message.reply("Нельзя выдать такую роль!")
@@ -9095,9 +8913,6 @@ async def on_chat_message(message: Message):
         target_display = await get_user_or_group_mention(user)
         await message.answer(
             f"{user_display} выдал(-а) уровень прав {level} в глобальной сетке бесед пользователю {target_display}")
-
-
-
 
     else:
         if user_id < 1:
@@ -9118,7 +8933,7 @@ async def on_chat_message(message: Message):
                     print(f"Ошибка при удалении сообщения: {e}")
 
             # Проверка режима тишины
-            elif await check_quit(chat_id) and await get_role(user_id, chat_id) < 1:
+            elif await check_quit(chat_id) and await get_role_cached(user_id, chat_id) < 1:
                 try:
                     await bot.api.messages.delete(group_id=message.group_id, peer_id=message.peer_id,
                                                   delete_for_all=True, cmids=message.conversation_message_id)
@@ -9129,7 +8944,7 @@ async def on_chat_message(message: Message):
             if await get_filter(chat_id):
                 bws = await get_banwords(chat_id)
                 for i in bws:
-                    if i in message.text.lower() and await get_role(user_id, chat_id) < 1:
+                    if i in message.text.lower() and await get_role_cached(user_id, chat_id) < 1:
                         await mute(user_id, chat_id, 'Бот', 'Написание запрещенных слов', 30)
                         keyboard = (
                             Keyboard(inline=True)
@@ -9155,7 +8970,7 @@ async def on_chat_message(message: Message):
 
             # Антифлуд
             if await get_antiflood(chat_id):
-                if await get_spam(user_id, chat_id) and await get_role(user_id, chat_id) < 1:
+                if await get_spam(user_id, chat_id) and await get_role_cached(user_id, chat_id) < 1:
                     keyboard = (
                         Keyboard(inline=True)
                         .add(Callback("Снять мут",
@@ -9173,22 +8988,19 @@ async def on_chat_message(message: Message):
                     except:
                         pass
 
-
 # Обновляем таблицы мутов при старте
 async def init_mute_system():
     await update_mutes_tables()
     # Загружаем существующие муты из БД в кэш
     try:
-        sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mutes_%'")
-        tables = sql.fetchall()
+        tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'mutes_%'")
 
         for table in tables:
             table_name = table[0]
             chat_id = int(table_name.replace('mutes_', ''))
 
             try:
-                sql.execute(f"SELECT user_id, moder, reason, date, time, expire_time FROM {table_name}")
-                rows = sql.fetchall()
+                rows = await db.fetchall(f"SELECT user_id, moder, reason, date, time, expire_time FROM {table_name}")
 
                 for row in rows:
                     user_id, moder, reason, mute_date, duration, expire_time = row
@@ -9218,13 +9030,11 @@ async def init_mute_system():
 
     print(f"Загружено {len(muted_users_cache)} активных мутов в кэш")
 
-
 async def update_all_bans_tables():
     """Обновляет все таблицы банов, добавляя колонки для времени"""
     try:
         # Получаем все таблицы банов
-        sql.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'bans_%'")
-        tables = sql.fetchall()
+        tables = await db.fetchall("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'bans_%'")
 
         for table in tables:
             table_name = table[0]
@@ -9242,31 +9052,30 @@ async def update_all_bans_tables():
                 continue
 
             # Проверяем текущую структуру
-            sql.execute(f"PRAGMA table_info({table_name})")
-            columns = sql.fetchall()
+            columns = await db.fetchall(f"PRAGMA table_info({table_name})")
+
             column_names = [col[1] for col in columns]
 
             # Добавляем недостающие колонки
             if 'ban_time' not in column_names:
-                sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_time INTEGER DEFAULT 0")
-                database.commit()
+                await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_time INTEGER DEFAULT 0")
+                pass
                 print(f"  + Добавлена колонка ban_time")
 
             if 'ban_expire' not in column_names:
-                sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_expire REAL DEFAULT 0")
-                database.commit()
+                await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_expire REAL DEFAULT 0")
+                pass
                 print(f"  + Добавлена колонка ban_expire")
 
             if 'ban_duration_text' not in column_names:
-                sql.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_duration_text TEXT DEFAULT 'навсегда'")
-                database.commit()
+                await db.execute(f"ALTER TABLE {table_name} ADD COLUMN ban_duration_text TEXT DEFAULT 'навсегда'")
+                pass
                 print(f"  + Добавлена колонка ban_duration_text")
 
         print("✅ Все таблицы банов успешно обновлены!")
 
     except Exception as e:
         print(f"Ошибка при обновлении таблиц: {e}")
-
 
 async def start_background_tasks():
     await update_mutes_tables()
@@ -9276,7 +9085,6 @@ async def start_background_tasks():
     asyncio.create_task(cleanup_mutes())
     asyncio.create_task(cleanup_bans())
     print("✅ Система мутов и банов запущена")
-
 
 # Создаем цикл событий и запускаем задачи
 loop = asyncio.get_event_loop()

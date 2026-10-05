@@ -1,3 +1,6 @@
+import sys
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 from vkbottle.exception_factory import VKAPIError
 import os, re
 import time
@@ -17,14 +20,137 @@ from typing import Optional
 from vkbottle import Keyboard, Callback, CtxStorage, KeyboardButtonColor, Text, GroupEventType, GroupTypes, User, \
     VKAPIError
 import json
-import sqlite3
+import db
 import locale
 import dateparser
+
+# ============================================================
+# ОПТИМИЗАЦИЯ: Глобальные кэши для ускорения ответов бота
+# ============================================================
+
+# Кэш для ruklist() (список админов)
+_ruklist_cache = {"data": None, "time": 0.0}
+_RUKLIST_TTL = 5.0  # время жизни кэша в секундах
+
+# Общий кэш для часто запрашиваемых данных (баланс, юзеры и т.д.)
+_data_cache = {"store": {}, "time": {}}
+_DATA_CACHE_TTL = 5.0  # время жизни кэша данных в секундах
+
+
+async def cached_ruklist():
+    """Кэшированная версия ruklist(). Кэш обновляется каждые 5 секунд."""
+    global _ruklist_cache
+    now = time.time()
+    if _ruklist_cache["data"] is not None and (now - _ruklist_cache["time"]) < _RUKLIST_TTL:
+        return _ruklist_cache["data"]
+    data = await ruklist()
+    _ruklist_cache["data"] = data
+    _ruklist_cache["time"] = now
+    return data
+
+
+async def cached_get_balance(user_id: int):
+    """Кэшированный запрос баланса."""
+    key = f"balance:{user_id}"
+    now = time.time()
+    if key in _data_cache["store"] and (now - _data_cache["time"].get(key, 0)) < _DATA_CACHE_TTL:
+        return _data_cache["store"][key]
+    val = await get_balance(user_id)
+    _data_cache["store"][key] = val
+    _data_cache["time"][key] = now
+    return val
+
+
+async def cached_get_user_data(user_id):
+    """Кэшированный запрос user_data."""
+    key = f"userdata:{user_id}"
+    now = time.time()
+    if key in _data_cache["store"] and (now - _data_cache["time"].get(key, 0)) < _DATA_CACHE_TTL:
+        return _data_cache["store"][key]
+    val = await get_user_data(user_id)
+    _data_cache["store"][key] = val
+    _data_cache["time"][key] = now
+    return val
+
+
+async def cached_getgame(chat_id: int):
+    """Кэшированный запрос статуса игры в чате."""
+    key = f"game:{chat_id}"
+    now = time.time()
+    if key in _data_cache["store"] and (now - _data_cache["time"].get(key, 0)) < _DATA_CACHE_TTL:
+        return _data_cache["store"][key]
+    val = await getgame(chat_id)
+    _data_cache["store"][key] = val
+    _data_cache["time"][key] = now
+    return val
+
+
+def invalidate_data_cache(keys: list = None):
+    """Очистить кэш данных. Если keys=None — очистить всё."""
+    if keys is None:
+        _data_cache["store"].clear()
+        _data_cache["time"].clear()
+    else:
+        for k in keys:
+            _data_cache["store"].pop(k, None)
+            _data_cache["time"].pop(k, None)
+
+
+def invalidate_ruklist_cache():
+    """Очистить кэш ruklist()."""
+    global _ruklist_cache
+    _ruklist_cache = {"data": None, "time": 0.0}
+
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
 def moscow_now():
     return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
+
+def safe_int(value):
+    """Конвертирует строку/float в int для PostgreSQL"""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    # Строка - убираем точки (разделители тысяч)
+    s = str(value).replace('.', '').replace(',', '.')
+    return int(float(s))
+
+def safe_float(value):
+    """Конвертирует строку/инт в float для PostgreSQL"""
+    if value is None:
+        return 0.0
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    s = str(value).replace('.', '').replace(',', '.')
+    return float(s)
+
+def format_money(value):
+    """Форматирует деньги для вывода"""
+    try:
+        num = safe_float(value)
+        return f'{num:,.2f}'.replace(',', '.')
+    except:
+        return str(value)
+
+def parse_datetime(dt_str):
+    """Парсит datetime из строки или возвращает datetime объект"""
+    if dt_str is None:
+        return moscow_now()
+    if isinstance(dt_str, datetime):
+        return dt_str
+    try:
+        return datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S.%f')
+    except:
+        try:
+            return datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
+        except:
+            return moscow_now()
 
 BALANCES_FILE = "balances.json"
 ctx = CtxStorage()
@@ -124,40 +250,36 @@ def get_mafia_lock(chat_id: int) -> asyncio.Lock:
 
 
 def ensure_mafia_mutes_table():
-    sql.execute("""
+    db.execute("""
         CREATE TABLE IF NOT EXISTS mafia_mutes (
             chat_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             PRIMARY KEY (chat_id, user_id)
         )
     """)
-    database.commit()
-
+    
 
 async def set_mafia_muted(chat_id: int, user_id: int, muted: bool = True):
     ensure_mafia_mutes_table()
     if muted:
-        sql.execute("INSERT OR IGNORE INTO mafia_mutes (chat_id, user_id) VALUES (?, ?)", (chat_id, user_id))
+        await db.execute("INSERT OR IGNORE INTO mafia_mutes (chat_id, user_id) VALUES (?, ?)", (chat_id, user_id))
     else:
-        sql.execute("DELETE FROM mafia_mutes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
-    database.commit()
-
+        await db.execute("DELETE FROM mafia_mutes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    
 
 async def sync_mafia_phase_mutes(game):
     ensure_mafia_mutes_table()
     # Мёртвые остаются в муте до конца игры. Ночью также молчат все живые.
     muted_ids = [p for p in game.players if not game.alive.get(p, False) or game.phase == "night"]
-    sql.execute("DELETE FROM mafia_mutes WHERE chat_id = ?", (game.chat_id,))
+    await db.execute("DELETE FROM mafia_mutes WHERE chat_id = ?", (game.chat_id,))
     sql.executemany("INSERT OR IGNORE INTO mafia_mutes (chat_id, user_id) VALUES (?, ?)",
                     [(game.chat_id, p) for p in muted_ids])
-    database.commit()
-
+    
 
 async def clear_mafia_mutes(chat_id: int):
     ensure_mafia_mutes_table()
-    sql.execute("DELETE FROM mafia_mutes WHERE chat_id = ?", (chat_id,))
-    database.commit()
-
+    await db.execute("DELETE FROM mafia_mutes WHERE chat_id = ?", (chat_id,))
+    
 
 def cancel_mafia_timer(game):
     task = getattr(game, "phase_timer_task", None)
@@ -819,8 +941,8 @@ BUSINESS_TYPES = {
 async def get_user_businesses(user_id: int) -> list:
     """Получить список бизнесов пользователя"""
     try:
-        sql.execute("""
-            SELECT ub.*, 
+        await db.execute("""
+            SELECT ub.id, ub.user_id, ub.biz_id, ub.purchase_date, ub.last_collected, ub.balance,
                    COALESCE(bt.name, 'Неизвестный бизнес') as name,
                    COALESCE(bt.emoji, '🏢') as emoji,
                    COALESCE(bt.min_profit, 0) as min_profit,
@@ -830,7 +952,7 @@ async def get_user_businesses(user_id: int) -> list:
             WHERE ub.user_id = ?
             ORDER BY ub.biz_id
         """, (user_id,))
-        return sql.fetchall()
+        return await db.fetchall()
     except Exception as e:
         print(f"Ошибка в get_user_businesses: {e}")
         return []
@@ -838,13 +960,13 @@ async def get_user_businesses(user_id: int) -> list:
 
 async def get_business_by_id(user_id: int, biz_id: int) -> tuple:
     """Получить конкретный бизнес пользователя"""
-    sql.execute("""
+    await db.execute("""
         SELECT ub.*, bt.name, bt.emoji, bt.min_profit, bt.max_profit 
         FROM user_businesses ub
         JOIN business_types bt ON ub.biz_id = bt.biz_id
         WHERE ub.user_id = ? AND ub.biz_id = ?
     """, (user_id, biz_id))
-    return sql.fetchone()
+    return await db.fetchone()
 
 
 async def buy_business(user_id: int, biz_id: int) -> dict:
@@ -854,8 +976,8 @@ async def buy_business(user_id: int, biz_id: int) -> dict:
         return {"success": False, "message": "Такого бизнеса не существует!"}
 
     # Проверяем, не куплен ли уже этот бизнес
-    sql.execute("SELECT id FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
-    if sql.fetchone():
+    await db.execute("SELECT id FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
+    if await db.fetchone():
         return {"success": False,
                 "message": f"У вас уже есть {BUSINESS_TYPES[biz_id]['emoji']} {BUSINESS_TYPES[biz_id]['name']}!"}
 
@@ -869,13 +991,12 @@ async def buy_business(user_id: int, biz_id: int) -> dict:
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
     await setmoney(user_id, -price)
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO user_businesses (user_id, biz_id, purchase_date, last_collected, balance)
         VALUES (?, ?, ?, ?, 0)
     """, (user_id, biz_id, current_time, current_time))
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=price,
                       log=f"купил бизнес {BUSINESS_TYPES[biz_id]['name']}")
 
@@ -894,14 +1015,13 @@ async def sell_business(user_id: int, biz_id: int) -> dict:
     balance = business[5]  # текущий баланс бизнеса
 
     # Удаляем бизнес
-    sql.execute("DELETE FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
+    await db.execute("DELETE FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
 
     # Возвращаем деньги за продажу + баланс бизнеса
     total_return = refund + balance
     await setmoney(user_id, total_return)
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=total_return,
                       log=f"продал бизнес {BUSINESS_TYPES[biz_id]['name']} за {refund}₽ + баланс {balance}₽")
 
@@ -955,14 +1075,13 @@ async def collect_business_profit(user_id: int, biz_id: int) -> dict:
     new_balance = current_balance + total_profit
     current_time_str = current_time.strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         UPDATE user_businesses 
         SET balance = ?, last_collected = ? 
         WHERE user_id = ? AND biz_id = ?
     """, (new_balance, current_time_str, user_id, biz_id))
 
-    database.commit()
-
+    
     return {
         "success": True,
         "message": f"✅ Прибыль с {biz_emoji} {biz_name} за {days_passed} дн.: +{total_profit:,}₽",
@@ -991,7 +1110,7 @@ async def withdraw_business_profit(user_id: int, biz_id: int, amount: int = None
 
     # Снимаем деньги
     new_balance = current_balance - amount
-    sql.execute("""
+    await db.execute("""
         UPDATE user_businesses SET balance = ? 
         WHERE user_id = ? AND biz_id = ?
     """, (new_balance, user_id, biz_id))
@@ -999,8 +1118,7 @@ async def withdraw_business_profit(user_id: int, biz_id: int, amount: int = None
     # Начисляем пользователю
     await setmoney(user_id, amount)
 
-    database.commit()
-
+    
     biz_emoji = business[7]
     biz_name = business[6]
 
@@ -1213,15 +1331,14 @@ async def delete_clan(clan_id: int) -> dict:
     """Полностью удалить клан"""
     try:
         # Удаляем все связанные данные
-        sql.execute("DELETE FROM clan_members WHERE clan_id = ?", (clan_id,))
-        sql.execute("DELETE FROM clan_invites WHERE clan_id = ?", (clan_id,))
-        sql.execute(
+        await db.execute("DELETE FROM clan_members WHERE clan_id = ?", (clan_id,))
+        await db.execute("DELETE FROM clan_invites WHERE clan_id = ?", (clan_id,))
+        await db.execute(
             "DELETE FROM clan_battles WHERE war_id IN (SELECT war_id FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?)",
             (clan_id, clan_id))
-        sql.execute("DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?", (clan_id, clan_id))
-        sql.execute("DELETE FROM clans WHERE clan_id = ?", (clan_id,))
+        await db.execute("DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?", (clan_id, clan_id))
+        await db.execute("DELETE FROM clans WHERE clan_id = ?", (clan_id,))
 
-        database.commit()
         return {"success": True, "message": "Клан успешно удалён"}
     except Exception as e:
         print(f"Ошибка при удалении клана: {e}")
@@ -1237,11 +1354,8 @@ async def get_logic(number=int):
 
 # Добавьте эту функцию для проверки
 def check_table_structure():
-    sql.execute("PRAGMA table_info(users)")
-    columns = sql.fetchall()
     print("Структура таблицы users:")
-    for col in columns:
-        print(f"  {col[1]} ({col[2]})")
+    print("  Используйте SQL запросы напрямую в PostgreSQL")
 
 
 for f in [BALANCES_FILE]:
@@ -1258,14 +1372,14 @@ async def can_work(user_id: int) -> tuple:
 async def get_role_appointment_date(user_id=int, chat_id=int):
     """Получить дату назначения на роль модератора"""
     try:
-        sql.execute(f"SELECT appointment_date FROM role_appointments WHERE user_id = ? AND chat_id = ?",
+        await db.execute(f"SELECT appointment_date FROM role_appointments WHERE user_id = ? AND chat_id = ?",
                     (user_id, chat_id))
-        fetch = sql.fetchone()
+        fetch = await db.fetchone()
         if fetch:
             return fetch[0]
         else:
             return None
-    except sqlite3.OperationalError as e:
+    except Exception as e:
         if "no such table" in str(e):
             # Таблица не существует, создадим её
             await create_role_appointments_table()
@@ -1277,7 +1391,7 @@ async def get_role_appointment_date(user_id=int, chat_id=int):
 
 async def create_role_appointments_table():
     """Создать таблицу для хранения дат назначения ролей"""
-    sql.execute("""
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS role_appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id BIGINT NOT NULL,
@@ -1287,7 +1401,6 @@ async def create_role_appointments_table():
             UNIQUE(user_id, chat_id)
         )
     """)
-    database.commit()
     print("Таблица role_appointments создана/проверена")
 
 
@@ -1295,28 +1408,27 @@ async def set_role_appointment_date(user_id=int, chat_id=int, role_level=int):
     """Установить/обновить дату назначения роли"""
     try:
         # Проверяем, есть ли уже запись
-        sql.execute(f"SELECT * FROM role_appointments WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-        existing = sql.fetchone()
+        await db.execute(f"SELECT * FROM role_appointments WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        existing = await db.fetchone()
 
         current_time = moscow_now().strftime('%Y-%m-%d')
 
         if existing:
             # Обновляем существующую запись
-            sql.execute("""
+            await db.execute("""
                 UPDATE role_appointments 
                 SET role_level = ?, appointment_date = ?
                 WHERE user_id = ? AND chat_id = ?
             """, (role_level, current_time, user_id, chat_id))
         else:
             # Создаем новую запись
-            sql.execute("""
+            await db.execute("""
                 INSERT INTO role_appointments (user_id, chat_id, role_level, appointment_date)
                 VALUES (?, ?, ?, ?)
             """, (user_id, chat_id, role_level, current_time))
 
-        database.commit()
         return True
-    except sqlite3.OperationalError as e:
+    except Exception as e:
         if "no such table" in str(e):
             # Таблица не существует, создаем
             await create_role_appointments_table()
@@ -1374,10 +1486,10 @@ async def getID(arg: str):
 
 async def find_clans_by_name(query: str, limit: int = 5) -> list:
     """Найти кланы по названию"""
-    sql.execute(
+    await db.execute(
         "SELECT clan_id, name, tag, level, members_count FROM clans WHERE name LIKE ? ORDER BY level DESC LIMIT ?",
         (f"%{query}%", limit))
-    return sql.fetchall()
+    return await db.fetchall()
 
 
 def get_string(words_list, start_index=0):
@@ -1385,8 +1497,12 @@ def get_string(words_list, start_index=0):
     return result if result else False
 
 
-database = sqlite3.connect('database1.db')
-sql = database.cursor()
+# Инициализация PostgreSQL
+async def init_db():
+    """Инициализация базы данных PostgreSQL"""
+    await db.init_pool()
+
+sql = db  # Для совместимости с старым кодом
 
 
 # ================== СИСТЕМА КЛАНОВ ==================
@@ -1397,62 +1513,59 @@ async def create_clan(leader_id: int, name: str, tag: str) -> dict:
         return {"success": False, "message": "Вы уже состоите в клане!"}
 
     # Проверяем уникальность названия и тега
-    sql.execute("SELECT clan_id FROM clans WHERE name = ? OR tag = ?", (name, tag))
-    if sql.fetchone():
+    await db.execute("SELECT clan_id FROM clans WHERE name = ? OR tag = ?", (name, tag))
+    if await db.fetchone():
         return {"success": False, "message": "Клан с таким названием или тегом уже существует!"}
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
     # Создаём клан
-    sql.execute("INSERT INTO clans (name, tag, leader_id, bank, created_date) VALUES (?, ?, ?, 0, ?)",
+    await db.execute("INSERT INTO clans (name, tag, leader_id, bank, created_date) VALUES (?, ?, ?, 0, ?)",
                 (name, tag, leader_id, current_time))
 
     # Получаем ID последней вставленной записи
     clan_id = sql.lastrowid
 
     # Добавляем лидера
-    sql.execute("INSERT INTO clan_members (user_id, clan_id, role, joined_date, donated) VALUES (?, ?, 'leader', ?, 0)",
+    await db.execute("INSERT INTO clan_members (user_id, clan_id, role, joined_date, donated) VALUES (?, ?, 'leader', ?, 0)",
                 (leader_id, clan_id, current_time))
 
-    database.commit()
-
+    
     return {"success": True, "clan_id": clan_id, "message": f"Клан '{name}' успешно создан!"}
 
 
 async def get_user_clan(user_id: int) -> dict:
     """Получить информацию о клане пользователя"""
-    sql.execute("""
+    await db.execute("""
         SELECT c.*, cm.role, cm.joined_date, cm.donated 
         FROM clans c 
         JOIN clan_members cm ON c.clan_id = cm.clan_id 
         WHERE cm.user_id = ?
     """, (user_id,))
 
-    row = sql.fetchone()
+    row = await db.fetchone()
     if not row:
         return None
 
     # Получаем названия колонок
-    columns = [description[0] for description in sql.description]
-    clan_data = dict(zip(columns, row))
+    clan_data = dict(row)
 
     return clan_data
 
 
 async def get_clan_by_id(clan_id: int) -> dict:
     """Получить информацию о клане по ID"""
-    sql.execute("SELECT * FROM clans WHERE clan_id = ?", (clan_id,))
-    row = sql.fetchone()
+    await db.execute("SELECT * FROM clans WHERE clan_id = ?", (clan_id,))
+    row = await db.fetchone()
     if not row:
         return None
 
-    columns = [description[0] for description in sql.description]
-    return dict(zip(columns, row))
+    return dict(row)
 
 
 async def get_clan_members(clan_id: int) -> list:
     """Получить список участников клана"""
-    sql.execute("""
+    await db.execute("""
         SELECT user_id, role, joined_date, donated 
         FROM clan_members 
         WHERE clan_id = ? 
@@ -1464,7 +1577,7 @@ async def get_clan_members(clan_id: int) -> list:
             END, donated DESC
     """, (clan_id,))
 
-    return sql.fetchall()
+    return await db.fetchall()
 
 
 async def add_clan_member(clan_id: int, user_id: int, inviter_id: int) -> dict:
@@ -1477,56 +1590,53 @@ async def add_clan_member(clan_id: int, user_id: int, inviter_id: int) -> dict:
     clan = await get_clan_by_id(clan_id)
     max_members = 10 + (clan["level"] * 5)  # 1 уровень - 15, 2 - 20 и т.д.
 
-    sql.execute("SELECT COUNT(*) FROM clan_members WHERE clan_id = ?", (clan_id,))
-    current_members = sql.fetchone()[0]
+    await db.execute("SELECT COUNT(*) FROM clan_members WHERE clan_id = ?", (clan_id,))
+    current_members = await db.fetchone()[0]
 
     if current_members >= max_members:
         return {"success": False, "message": f"Достигнут лимит участников клана ({max_members})!"}
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("INSERT INTO clan_members (user_id, clan_id, role, joined_date, donated) VALUES (?, ?, 'member', ?, 0)",
+    await db.execute("INSERT INTO clan_members (user_id, clan_id, role, joined_date, donated) VALUES (?, ?, 'member', ?, 0)",
                 (user_id, clan_id, current_time))
 
     # Обновляем счетчик участников
-    sql.execute("UPDATE clans SET members_count = members_count + 1 WHERE clan_id = ?", (clan_id,))
+    await db.execute("UPDATE clans SET members_count = members_count + 1 WHERE clan_id = ?", (clan_id,))
 
-    database.commit()
-
+    
     return {"success": True, "message": "Пользователь добавлен в клан!"}
 
 
 async def remove_clan_member(user_id: int, clan_id: int) -> dict:
     """Удалить участника из клана"""
     # Проверяем, не лидер ли
-    sql.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
-    role = sql.fetchone()
+    await db.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
+    role = await db.fetchone()
 
     if role and role[0] == 'leader':
         return {"success": False, "message": "Нельзя удалить лидера клана! Передайте права другому участнику."}
 
-    sql.execute("DELETE FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
-    sql.execute("UPDATE clans SET members_count = members_count - 1 WHERE clan_id = ?", (clan_id,))
+    await db.execute("DELETE FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
+    await db.execute("UPDATE clans SET members_count = members_count - 1 WHERE clan_id = ?", (clan_id,))
 
-    database.commit()
-
+    
     return {"success": True, "message": "Участник удалён из клана!"}
 
 
 async def transfer_leadership(clan_id: int, new_leader_id: int, old_leader_id: int) -> dict:
     """Передать права лидера"""
     # Проверяем, что новый лидер в клане
-    sql.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (new_leader_id, clan_id))
-    if not sql.fetchone():
+    await db.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (new_leader_id, clan_id))
+    if not await db.fetchone():
         return {"success": False, "message": "Новый лидер не состоит в клане!"}
 
     # Меняем роли
-    sql.execute("UPDATE clan_members SET role = 'member' WHERE user_id = ? AND clan_id = ?", (old_leader_id, clan_id))
-    sql.execute("UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?", (new_leader_id, clan_id))
-    sql.execute("UPDATE clans SET leader_id = ? WHERE clan_id = ?", (new_leader_id, clan_id))
+    await db.execute("UPDATE clan_members SET role = 'member' WHERE user_id = ? AND clan_id = ?", (old_leader_id, clan_id))
+    await db.execute("UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?", (new_leader_id, clan_id))
+    await db.execute("UPDATE clans SET leader_id = ? WHERE clan_id = ?", (new_leader_id, clan_id))
 
-    database.commit()
-
+    
     return {"success": True, "message": "Права лидера успешно переданы!"}
 
 
@@ -1545,56 +1655,53 @@ async def add_clan_exp(clan_id: int, exp: int):
     exp_needed_for_next_level = level * 1000
     
     # Обновляем опыт
-    sql.execute("UPDATE clans SET exp = ? WHERE clan_id = ?", (current_exp, clan_id))
+    await db.execute("UPDATE clans SET exp = ? WHERE clan_id = ?", (current_exp, clan_id))
     
     # Проверяем повышение уровня
     if current_exp >= exp_needed_for_next_level:
         # Повышаем уровень и переносим лишний опыт
         excess_exp = current_exp - exp_needed_for_next_level
         new_level = level + 1
-        sql.execute("UPDATE clans SET level = ?, exp = ? WHERE clan_id = ?",
+        await db.execute("UPDATE clans SET level = ?, exp = ? WHERE clan_id = ?",
                     (new_level, excess_exp, clan_id))
-        database.commit()
         return True  # Повысили уровень
     
-    database.commit()
-    return False
+        return False
 
 
 async def create_clan_invite(clan_id: int, inviter_id: int, target_id: int) -> dict:
     """Создать приглашение в клан"""
     # Проверяем, не приглашали ли уже
-    sql.execute("SELECT * FROM clan_invites WHERE clan_id = ? AND user_id = ?", (clan_id, target_id))
-    if sql.fetchone():
+    await db.execute("SELECT * FROM clan_invites WHERE clan_id = ? AND user_id = ?", (clan_id, target_id))
+    if await db.fetchone():
         return {"success": False, "message": "Приглашение уже отправлено!"}
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("INSERT INTO clan_invites (clan_id, user_id, inviter_id, date) VALUES (?, ?, ?, ?)",
+    await db.execute("INSERT INTO clan_invites (clan_id, user_id, inviter_id, date) VALUES (?, ?, ?, ?)",
                 (clan_id, target_id, inviter_id, current_time))
 
-    database.commit()
-
+    
     return {"success": True, "message": "Приглашение отправлено!"}
 
 
 async def get_clan_invites(user_id: int) -> list:
     """Получить все приглашения пользователя"""
-    sql.execute("""
+    await db.execute("""
         SELECT ci.*, c.name, c.tag 
         FROM clan_invites ci
         JOIN clans c ON ci.clan_id = c.clan_id
         WHERE ci.user_id = ?
     """, (user_id,))
 
-    return sql.fetchall()
+    return await db.fetchall()
 
 
 async def accept_clan_invite(invite_id: int, user_id: int) -> dict:
     """Принять приглашение в клан"""
     # Получаем информацию о приглашении
-    sql.execute("SELECT clan_id FROM clan_invites WHERE invite_id = ? AND user_id = ?", (invite_id, user_id))
-    invite = sql.fetchone()
+    await db.execute("SELECT clan_id FROM clan_invites WHERE invite_id = ? AND user_id = ?", (invite_id, user_id))
+    invite = await db.fetchone()
 
     if not invite:
         return {"success": False, "message": "Приглашение не найдено!"}
@@ -1605,22 +1712,21 @@ async def accept_clan_invite(invite_id: int, user_id: int) -> dict:
     result = await add_clan_member(clan_id, user_id, user_id)
     if result["success"]:
         # Удаляем приглашение
-        sql.execute("DELETE FROM clan_invites WHERE invite_id = ?", (invite_id,))
-        database.commit()
-
+        await db.execute("DELETE FROM clan_invites WHERE invite_id = ?", (invite_id,))
+        
     return result
 
 
 async def get_top_clans(limit: int = 10) -> list:
     """Получить топ кланов"""
-    sql.execute("""
+    await db.execute("""
         SELECT clan_id, name, tag, level, exp, bank, members_count, wins, losses 
         FROM clans 
         ORDER BY level DESC, exp DESC, wins DESC 
         LIMIT ?
     """, (limit,))
 
-    return sql.fetchall()
+    return await db.fetchall()
 
 
 async def clan_deposit(user_id: int, clan_id: int, amount: int) -> dict:
@@ -1637,10 +1743,10 @@ async def clan_deposit(user_id: int, clan_id: int, amount: int) -> dict:
     await setmoney(user_id, -amount)
 
     # Добавляем в казну
-    sql.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (amount, clan_id))
+    await db.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (amount, clan_id))
 
     # Обновляем статистику пожертвований
-    sql.execute("UPDATE clan_members SET donated = donated + ? WHERE user_id = ? AND clan_id = ?",
+    await db.execute("UPDATE clan_members SET donated = donated + ? WHERE user_id = ? AND clan_id = ?",
                 (amount, user_id, clan_id))
 
     # 🔒 ЗАЩИТА ОТ НАКРУТКИ: опыт начисляется только от 1% от суммы
@@ -1651,8 +1757,7 @@ async def clan_deposit(user_id: int, clan_id: int, amount: int) -> dict:
     if exp_gain > 0:
         await add_clan_exp(clan_id, exp_gain)
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=amount, log=f"положил в казну клана {amount}₽")
 
     return {"success": True, "message": f"Вы положили {amount}₽ в казну клана! Клан получил {exp_gain} опыта."}
@@ -1661,8 +1766,8 @@ async def clan_deposit(user_id: int, clan_id: int, amount: int) -> dict:
 async def clan_withdraw(user_id: int, clan_id: int, amount: int) -> dict:
     """Снять деньги из казны (только лидер или зам)"""
     # Проверяем права
-    sql.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
-    role = sql.fetchone()
+    await db.execute("SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id))
+    role = await db.fetchone()
 
     if not role or role[0] not in ['leader', 'deputy']:
         return {"success": False, "message": "Только лидер и его заместитель могут снимать из казны!"}
@@ -1673,7 +1778,7 @@ async def clan_withdraw(user_id: int, clan_id: int, amount: int) -> dict:
         return {"success": False, "message": f"В казне недостаточно средств! Доступно: {clan['bank']}₽"}
 
     # Снимаем из казны
-    sql.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (amount, clan_id))
+    await db.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (amount, clan_id))
 
     # Комиссия 10%
     commission = amount // 10
@@ -1682,8 +1787,7 @@ async def clan_withdraw(user_id: int, clan_id: int, amount: int) -> dict:
     # Начисляем пользователю за вычетом комиссии
     await setmoney(user_id, actual_amount)
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=amount, log=f"снял из казны клана {amount}₽ (комиссия {commission}₽)")
 
     return {"success": True, "message": f"Вы сняли {amount}₽ из казны клана! Коммисия - 10%\n\nИтого: {actual_amount}₽"}
@@ -1705,39 +1809,36 @@ async def create_clan_war(clan1_id: int, clan2_id: int, bet: int, creator_id: in
         return {"success": False, "message": f"У клана-противника недостаточно средств в казне!"}
 
     # Проверяем, нет ли уже активной войны
-    sql.execute("""
+    await db.execute("""
         SELECT * FROM clan_wars 
         WHERE ((clan1_id = ? OR clan2_id = ?) AND status IN ('pending', 'active'))
     """, (clan1_id, clan1_id))
 
-    if sql.fetchone():
+    if await db.fetchone():
         return {"success": False, "message": "У вашего клана уже есть активная война!"}
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO clan_wars (clan1_id, clan2_id, bet, status, start_time) 
         VALUES (?, ?, ?, 'pending', ?)
     """, (clan1_id, clan2_id, bet, current_time))
 
     war_id = sql.lastrowid
-    database.commit()
-
+    
     return {"success": True, "war_id": war_id, "message": "Война создана! Ожидайте подтверждения противника."}
 
 
 async def accept_clan_war(war_id: int, clan_id: int) -> dict:
     """Принять клановую войну"""
-    sql.execute("SELECT * FROM clan_wars WHERE war_id = ? AND clan2_id = ? AND status = 'pending'",
+    await db.execute("SELECT * FROM clan_wars WHERE war_id = ? AND clan2_id = ? AND status = 'pending'",
                 (war_id, clan_id))
-    war = sql.fetchone()
+    war = await db.fetchone()
 
     if not war:
         return {"success": False, "message": "Война не найдена или уже принята!"}
 
-    # Получаем названия колонок
-    columns = [description[0] for description in sql.description]
-    war_data = dict(zip(columns, war))
+    war_data = dict(war)
 
     # Проверяем наличие средств
     clan2 = await get_clan_by_id(clan_id)
@@ -1745,19 +1846,18 @@ async def accept_clan_war(war_id: int, clan_id: int) -> dict:
         return {"success": False, "message": "В казне клана недостаточно средств для участия в войне!"}
 
     # Блокируем ставки в казне
-    sql.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (war_data["bet"], clan_id))
-    sql.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (war_data["bet"], war_data["clan1_id"]))
+    await db.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (war_data["bet"], clan_id))
+    await db.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (war_data["bet"], war_data["clan1_id"]))
 
     # Начинаем войну
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-    sql.execute("""
+    await db.execute("""
         UPDATE clan_wars 
         SET status = 'active', start_time = ? 
         WHERE war_id = ?
     """, (current_time, war_id))
 
-    database.commit()
-
+    
     return {"success": True, "message": "Война принята! Сражения начинаются!"}
 
 
@@ -1775,8 +1875,8 @@ async def create_clan_battle(war_id: int, user1_id: int, user2_id: int, bet: int
         return {"success": False, "message": "Нельзя сражаться с одноклановцем!"}
 
     # Проверяем, существует ли война и активна ли она
-    sql.execute("SELECT status, clan1_id, clan2_id FROM clan_wars WHERE war_id = ?", (war_id,))
-    war = sql.fetchone()
+    await db.execute("SELECT status, clan1_id, clan2_id FROM clan_wars WHERE war_id = ?", (war_id,))
+    war = await db.fetchone()
 
     if not war:
         return {"success": False, "message": "Война не найдена!"}
@@ -1795,83 +1895,79 @@ async def create_clan_battle(war_id: int, user1_id: int, user2_id: int, bet: int
         return {"success": False, "message": "Участники должны быть из разных кланов!"}
 
     # Проверяем, нет ли уже активного сражения между этими пользователями
-    sql.execute("""
+    await db.execute("""
         SELECT battle_id FROM clan_battles 
         WHERE war_id = ? AND status = 'pending' 
         AND ((user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?))
     """, (war_id, user1_id, user2_id, user2_id, user1_id))
 
-    if sql.fetchone():
+    if await db.fetchone():
         return {"success": False, "message": "Вы уже вызвали этого пользователя на дуэль!"}
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO clan_battles (war_id, user1_id, user2_id, bet, status, created_at) 
         VALUES (?, ?, ?, ?, 'pending', ?)
     """, (war_id, user1_id, user2_id, bet, current_time))
 
     battle_id = sql.lastrowid
-    database.commit()
-
+    
     return {"success": True, "battle_id": battle_id}
 
 async def finish_clan_battle(battle_id: int, winner_id: int) -> dict:
     """Завершить сражение и обновить счёт (деньги в казну клана)"""
-    sql.execute("SELECT * FROM clan_battles WHERE battle_id = ?", (battle_id,))
-    battle = sql.fetchone()
+    await db.execute("SELECT * FROM clan_battles WHERE battle_id = ?", (battle_id,))
+    battle = await db.fetchone()
 
     if not battle:
         return {"success": False, "message": "Сражение не найдено!"}
 
-    columns = [description[0] for description in sql.description]
-    battle_data = dict(zip(columns, battle))
+    battle_data = dict(battle)
 
     if battle_data["status"] != "pending":
         return {"success": False, "message": "Сражение уже завершено!"}
 
     # Определяем, какому клану принадлежит победитель
-    sql.execute("SELECT clan_id FROM clan_members WHERE user_id = ?", (winner_id,))
-    winner_clan = sql.fetchone()
+    await db.execute("SELECT clan_id FROM clan_members WHERE user_id = ?", (winner_id,))
+    winner_clan = await db.fetchone()
 
-    sql.execute("SELECT clan1_id, clan2_id, bet FROM clan_wars WHERE war_id = ?", (battle_data["war_id"],))
-    war = sql.fetchone()
+    await db.execute("SELECT clan1_id, clan2_id, bet FROM clan_wars WHERE war_id = ?", (battle_data["war_id"],))
+    war = await db.fetchone()
     war_bet = war[2]  # ставка за всю войну
 
     # Обновляем счёт в войне
     if winner_clan[0] == war[0]:
         # Победил клан1
-        sql.execute("UPDATE clan_wars SET clan1_score = clan1_score + 1 WHERE war_id = ?", (battle_data["war_id"],))
+        await db.execute("UPDATE clan_wars SET clan1_score = clan1_score + 1 WHERE war_id = ?", (battle_data["war_id"],))
     else:
         # Победил клан2
-        sql.execute("UPDATE clan_wars SET clan2_score = clan2_score + 1 WHERE war_id = ?", (battle_data["war_id"],))
+        await db.execute("UPDATE clan_wars SET clan2_score = clan2_score + 1 WHERE war_id = ?", (battle_data["war_id"],))
 
-    sql.execute("UPDATE clan_battles SET status = 'finished', winner_id = ? WHERE battle_id = ?",
+    await db.execute("UPDATE clan_battles SET status = 'finished', winner_id = ? WHERE battle_id = ?",
                 (winner_id, battle_id))
 
     # 💰💰💰 НАЧИСЛЯЕМ ДЕНЬГИ В КАЗНУ КЛАНА ПОБЕДИТЕЛЯ 💰💰💰
     # Ставка за дуэль идёт в казну клана, а не личный баланс
     clan_id = winner_clan[0]
-    sql.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (battle_data["bet"], clan_id))
+    await db.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (battle_data["bet"], clan_id))
 
     # Добавляем опыт клану за победу в дуэли
     exp_gain = battle_data["bet"] // 20  # 5% от ставки
     await add_clan_exp(clan_id, exp_gain)
 
-    database.commit()
-
+    
     return {"success": True, "message": "Сражение завершено! Деньги поступили в казну клана."}
 
 async def check_war_end(war_id: int) -> dict:
     """Проверить, не закончилась ли война"""
-    sql.execute("SELECT * FROM clan_wars WHERE war_id = ?", (war_id,))
-    war = sql.fetchone()
+    await db.execute("SELECT * FROM clan_wars WHERE war_id = ?", (war_id,))
+    war = await db.fetchone()
 
     if not war:
         return {"finished": False}
 
-    columns = [description[0] for description in sql.description]
-    war_data = dict(zip(columns, war))
+    war_data = dict(war)
 
     # Война заканчивается, когда одна из сторон набирает 5 побед
     if war_data.get("clan1_score", 0) >= 5 or war_data.get("clan2_score", 0) >= 5:
@@ -1881,22 +1977,21 @@ async def check_war_end(war_id: int) -> dict:
         total_bet = war_data["bet"] * 2
 
         # Победитель получает всё в казну
-        sql.execute("UPDATE clans SET bank = bank + ?, wins = wins + 1 WHERE clan_id = ?",
+        await db.execute("UPDATE clans SET bank = bank + ?, wins = wins + 1 WHERE clan_id = ?",
                     (total_bet, winner_id))
-        sql.execute("UPDATE clans SET losses = losses + 1 WHERE clan_id = ?", (loser_id,))
+        await db.execute("UPDATE clans SET losses = losses + 1 WHERE clan_id = ?", (loser_id,))
 
         # Добавляем опыт за войну
         await add_clan_exp(winner_id, total_bet // 10)
 
         current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        sql.execute("""
+        await db.execute("""
             UPDATE clan_wars 
             SET status = 'finished', winner_id = ?, end_time = ? 
             WHERE war_id = ?
         """, (winner_id, current_time, war_id))
 
-        database.commit()
-
+        
         winner_clan = await get_clan_by_id(winner_id)
         loser_clan = await get_clan_by_id(loser_id)
 
@@ -1911,8 +2006,8 @@ async def check_war_end(war_id: int) -> dict:
     return {"finished": False}
 
 async def check_chat(chat_id=int):
-    sql.execute(f"SELECT * FROM chats WHERE chat_id = {chat_id}")
-    if sql.fetchone() == None:
+    await db.execute(f"SELECT * FROM chats WHERE chat_id = {chat_id}")
+    if await db.fetchone() == None:
         return False
     else:
         return True
@@ -1920,11 +2015,10 @@ async def check_chat(chat_id=int):
 
 async def log_economy(user_id=None, target_id=None, amount=None, log=None):
     try:
-        sql.execute(
+        await db.execute(
             "INSERT INTO economy (user_id, target_id, amount, log) VALUES (?, ?, ?, ?)",
             (user_id, target_id, amount, log)
         )
-        database.commit()
         print(f"[ECONOMY LOG] {user_id} -> {target_id} | {amount} | {log}")
     except Exception as e:
         print(f"[ECONOMY LOG ERROR] {e}")
@@ -1932,51 +2026,50 @@ async def log_economy(user_id=None, target_id=None, amount=None, log=None):
 
 async def chats_log(user_id=None, target_id=None, role=None, log=None):
     try:
-        sql.execute(
+        await db.execute(
             "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
             (user_id, target_id, role, log)
         )
-        database.commit()
         print(f"[CHATS LOG] {user_id} -> {target_id} | {role} | {log}")
     except Exception as e:
         print(f"[CHATS LOG ERROR] {e}")
 
 
 # 🔧 МИГРАЦИЯ: Исправление аномального опыта в кланах
-try:
-    sql.execute("SELECT clan_id, level, exp FROM clans")
-    clans_data = sql.fetchall()
-    fixed_count = 0
-    for clan in clans_data:
-        clan_id, level, exp = clan
-        exp_needed_for_next_level = level * 1000
-        # Если опыт больше или равен требуемому для следующего уровня — исправляем
-        if exp >= exp_needed_for_next_level:
-            excess_exp = exp - exp_needed_for_next_level
-            # Вычисляем сколько уровней можно повысить
-            extra_levels = 0
-            remaining_exp = excess_exp
-            current_level = level + 1
-            while remaining_exp >= (current_level + 1) * 1000:
-                extra_levels += 1
+async def migrate_clan_exp():
+    try:
+        await db.execute("SELECT clan_id, level, exp FROM clans")
+        clans_data = await db.fetchall()
+        fixed_count = 0
+        for clan in clans_data:
+            clan_id, level, exp = clan
+            exp_needed_for_next_level = level * 1000
+            # Если опыт больше или равен требуемому для следующего уровня — исправляем
+            if exp >= exp_needed_for_next_level:
+                excess_exp = exp - exp_needed_for_next_level
+                # Вычисляем сколько уровней можно повысить
+                extra_levels = 0
+                remaining_exp = excess_exp
+                current_level = level + 1
+                while remaining_exp >= (current_level + 1) * 1000:
+                    extra_levels += 1
                 remaining_exp -= (current_level + 1) * 1000
                 current_level += 1
             
             new_level = level + 1 + extra_levels
             new_exp = remaining_exp
             
-            sql.execute("UPDATE clans SET level = ?, exp = ? WHERE clan_id = ?",
+            await db.execute("UPDATE clans SET level = ?, exp = ? WHERE clan_id = ?",
                         (new_level, new_exp, clan_id))
             print(f"[CLAN FIX] Исправлен опыт клана {clan_id}: level {level}→{new_level}, exp {exp}→{new_exp}")
             fixed_count += 1
-    
-    if fixed_count > 0:
-        database.commit()
-        print(f"[CLAN MIGRATION] Исправлено {fixed_count} кланов с аномальным опытом")
-except Exception as e:
-    print(f"[CLAN MIGRATION ERROR] {e}")
-
-
+        
+        if fixed_count > 0:
+            print(f"[CLAN MIGRATION] Исправлено {fixed_count} кланов с аномальным опытом")
+        return fixed_count
+    except Exception as e:
+        print(f"[CLAN MIGRATION ERROR] {e}")
+        return 0
 # ВРЕМЕННЫЙ КОД - запустите один раз для исправления базы данных
 async def fix_businesses():
     # Проверяем и добавляем недостающие бизнесы в business_types
@@ -1998,9 +2091,9 @@ async def fix_businesses():
     for biz in missing_businesses:
         try:
             # Проверяем, есть ли уже такая запись
-            sql.execute("SELECT biz_id FROM business_types WHERE biz_id = ?", (biz[0],))
-            if not sql.fetchone():
-                sql.execute(
+            await db.execute("SELECT biz_id FROM business_types WHERE biz_id = ?", (biz[0],))
+            if not await db.fetchone():
+                await db.execute(
                     "INSERT INTO business_types (biz_id, name, emoji, price, min_profit, max_profit, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     biz
                 )
@@ -2008,8 +2101,7 @@ async def fix_businesses():
         except Exception as e:
             print(f"Ошибка при добавлении бизнеса {biz[1]}: {e}")
 
-    database.commit()
-    print("Проверка бизнесов завершена!")
+        print("Проверка бизнесов завершена!")
 
 
 # Запустите эту функцию один раз
@@ -2022,13 +2114,13 @@ async def buy_business(user_id: int, biz_id: int) -> dict:
         return {"success": False, "message": "Такого бизнеса не существует!"}
 
     # Проверяем, есть ли бизнес в таблице business_types
-    sql.execute("SELECT * FROM business_types WHERE biz_id = ?", (biz_id,))
-    if not sql.fetchone():
+    await db.execute("SELECT * FROM business_types WHERE biz_id = ?", (biz_id,))
+    if not await db.fetchone():
         return {"success": False, "message": "Ошибка: бизнес не найден в базе данных!"}
 
     # Проверяем, не куплен ли уже этот бизнес
-    sql.execute("SELECT id FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
-    if sql.fetchone():
+    await db.execute("SELECT id FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
+    if await db.fetchone():
         return {"success": False,
                 "message": f"У вас уже есть {BUSINESS_TYPES[biz_id]['emoji']} {BUSINESS_TYPES[biz_id]['name']}!"}
 
@@ -2042,19 +2134,18 @@ async def buy_business(user_id: int, biz_id: int) -> dict:
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
     await setmoney(user_id, -price)
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO user_businesses (user_id, biz_id, purchase_date, last_collected, balance)
         VALUES (?, ?, ?, ?, 0)
     """, (user_id, biz_id, current_time, current_time))
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=price,
                       log=f"купил бизнес {BUSINESS_TYPES[biz_id]['name']}")
 
     # Проверяем, что бизнес действительно добавился
-    sql.execute("SELECT * FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
-    if sql.fetchone():
+    await db.execute("SELECT * FROM user_businesses WHERE user_id = ? AND biz_id = ?", (user_id, biz_id))
+    if await db.fetchone():
         return {"success": True,
                 "message": f"✅ Вы успешно купили {BUSINESS_TYPES[biz_id]['emoji']} {BUSINESS_TYPES[biz_id]['name']}!"}
     else:
@@ -2062,46 +2153,46 @@ async def buy_business(user_id: int, biz_id: int) -> dict:
 
 
 async def new_chat(chat_id=int, peer_id=int, owner_id=int):
-    sql.execute(f"INSERT INTO chats VALUES (?, ?, ?, '', 0, 0, 0, 0, 0, 0, 0, 0);", (chat_id, peer_id, owner_id))
-    sql.execute(f"CREATE TABLE IF NOT EXISTS permissions_{chat_id} (user_id BIGINT, level BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS balance (user_id BIGINT, money BIGINT, blago BIGINT, bank BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS staffbot (user_id BIGINT, level BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS ruk (user_id BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS logsrole (user BIGINT, role BIGINT, chat_id BIfGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS economy (user_id INTEGER, target_id INTEGER, amount INTEGER, log TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS logchats (user_id INTEGER, target_id INTEGER, role INTEGER, log TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS rules (chat_id BIGINT, text Text);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS info (chat_id BIGINT, text Text);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS banschats (chat_id BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS photosettings (chat_id BIGINT NOT NULL PRIMARY KEY,mode INT NOT NULL);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS usprom (user_id BIGINT, promo TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS vip (user_id BIGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS nicks_{chat_id} (user_id BIGINT, nick TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS promo (promo TEXT, status TEXT, vip BIGINT, money BIGINT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS banwords_{chat_id} (banword TEXT);")
-    sql.execute(
+    await db.execute(f"INSERT INTO chats VALUES (?, ?, ?, '', 0, 0, 0, 0, 0, 0, 0, 0);", (chat_id, peer_id, owner_id))
+    await db.execute(f"CREATE TABLE IF NOT EXISTS permissions_{chat_id} (user_id BIGINT, level BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS balance (user_id BIGINT, money BIGINT, blago BIGINT, bank BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS staffbot (user_id BIGINT, level BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS ruk (user_id BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS logsrole (user BIGINT, role BIGINT, chat_id BIfGINT, date_string TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS economy (user_id INTEGER, target_id INTEGER, amount INTEGER, log TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS logchats (user_id INTEGER, target_id INTEGER, role INTEGER, log TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS rules (chat_id BIGINT, text Text);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS info (chat_id BIGINT, text Text);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS banschats (chat_id BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS photosettings (chat_id BIGINT NOT NULL PRIMARY KEY,mode INT NOT NULL);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS usprom (user_id BIGINT, promo TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS vip (user_id BIGINT, date_string TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS nicks_{chat_id} (user_id BIGINT, nick TEXT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS promo (promo TEXT, status TEXT, vip BIGINT, money BIGINT);")
+    await db.execute(f"CREATE TABLE IF NOT EXISTS banwords_{chat_id} (banword TEXT);")
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS warns_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS vig_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS mutes_{chat_id} (user_id BIGINT, moder TEXT, reason TEXT, date BIGINT, date_string TEXT, time BIGINT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS bans_{chat_id} (user_id BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS gbans (user_id BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS messages_{chat_id} (user_id BIGINT, date BIGINT, date_string TEXT, message_id BIGINT, cmid BIGINT);")
-    sql.execute(
+    await db.execute(
         f'CREATE TABLE IF NOT EXISTS users (user_id BIGINT, last_bonus TIMESTAMP DEFAULT NULL);')
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS warnhistory_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS vighistory_{chat_id} (user_id BIGINT, count BIGINT, moder BIGINT, reason TEXT, date BIGINT, date_string TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS punishments_{chat_id} (user_id BIGINT, date TEXT);")
-    sql.execute(
+    await db.execute(f"CREATE TABLE IF NOT EXISTS punishments_{chat_id} (user_id BIGINT, date TEXT);")
+    await db.execute(
         f"CREATE TABLE IF NOT EXISTS jobs (user_id BIGINT PRIMARY KEY, job_id INTEGER, skill INTEGER, last_work_time TEXT);")
-    sql.execute(f"CREATE TABLE IF NOT EXISTS user_skills (user_id BIGINT PRIMARY KEY, skill INTEGER);")
-    sql.execute("CREATE TABLE IF NOT EXISTS clans ("
+    await db.execute(f"CREATE TABLE IF NOT EXISTS user_skills (user_id BIGINT PRIMARY KEY, skill INTEGER);")
+    await db.execute("CREATE TABLE IF NOT EXISTS clans ("
                 "clan_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "name TEXT UNIQUE, "
                 "tag TEXT UNIQUE, "
@@ -2114,7 +2205,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "losses INTEGER DEFAULT 0, "
                 "created_date TEXT)")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_members ("
+    db.execute("CREATE TABLE IF NOT EXISTS clan_members ("
                 "user_id BIGINT PRIMARY KEY, "
                 "clan_id INTEGER, "
                 "role TEXT DEFAULT 'member', "  # leader, deputy, member
@@ -2122,7 +2213,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "donated BIGINT DEFAULT 0, "
                 "FOREIGN KEY(clan_id) REFERENCES clans(clan_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_wars ("
+    db.execute("CREATE TABLE IF NOT EXISTS clan_wars ("
                 "war_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "clan1_id INTEGER, "
                 "clan2_id INTEGER, "
@@ -2136,7 +2227,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "FOREIGN KEY(clan1_id) REFERENCES clans(clan_id), "
                 "FOREIGN KEY(clan2_id) REFERENCES clans(clan_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_invites ("
+    db.execute("CREATE TABLE IF NOT EXISTS clan_invites ("
                 "invite_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "clan_id INTEGER, "
                 "user_id BIGINT, "
@@ -2145,7 +2236,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "FOREIGN KEY(clan_id) REFERENCES clans(clan_id))")
 
     # Найдите в new_chat этот блок и замените:
-    sql.execute("CREATE TABLE IF NOT EXISTS clan_battles ("
+    db.execute("CREATE TABLE IF NOT EXISTS clan_battles ("
                 "battle_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "war_id INTEGER, "
                 "user1_id BIGINT, "
@@ -2155,9 +2246,9 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "status TEXT DEFAULT 'pending', "
                 "created_at TEXT, "
                 "FOREIGN KEY(war_id) REFERENCES clan_wars(war_id))")
-    sql.execute(
+    db.execute(
         "CREATE TABLE IF NOT EXISTS jobs (user_id BIGINT PRIMARY KEY, job_id INTEGER, skill INTEGER DEFAULT 0, last_work_time TEXT)")
-    sql.execute("CREATE TABLE IF NOT EXISTS business_types ("
+    db.execute("CREATE TABLE IF NOT EXISTS business_types ("
                 "biz_id INTEGER PRIMARY KEY, "
                 "name TEXT, "
                 "emoji TEXT, "
@@ -2167,7 +2258,7 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "description TEXT)")
 
     # Добавьте в функцию new_chat после создания других таблиц
-    sql.execute("CREATE TABLE IF NOT EXISTS marriages ("
+    db.execute("CREATE TABLE IF NOT EXISTS marriages ("
                 "marriage_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user1_id BIGINT NOT NULL, "
                 "user2_id BIGINT NOT NULL, "
@@ -2178,14 +2269,14 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "divorce_date TEXT, "
                 "UNIQUE(user1_id, user2_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS marriage_proposals ("
+    db.execute("CREATE TABLE IF NOT EXISTS marriage_proposals ("
                 "proposal_id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "from_id BIGINT NOT NULL, "
                 "to_id BIGINT NOT NULL, "
                 "proposal_date TEXT NOT NULL, "
                 "status TEXT DEFAULT 'pending')")  # pending, accepted, rejected
 
-    sql.execute("CREATE TABLE IF NOT EXISTS user_businesses ("
+    db.execute("CREATE TABLE IF NOT EXISTS user_businesses ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user_id BIGINT, "
                 "biz_id INTEGER, "
@@ -2195,25 +2286,24 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
                 "FOREIGN KEY(biz_id) REFERENCES business_types(biz_id), "
                 "UNIQUE(user_id, biz_id))")
     # Добавьте в функцию new_chat после существующих CREATE TABLE
-    sql.execute("CREATE TABLE IF NOT EXISTS houses ("
+    db.execute("CREATE TABLE IF NOT EXISTS houses ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user_id BIGINT NOT NULL, "
                 "house_id INTEGER NOT NULL, "
                 "purchase_date TEXT NOT NULL, "
                 "UNIQUE(user_id, house_id))")
 
-    sql.execute("CREATE TABLE IF NOT EXISTS cars ("
+    db.execute("CREATE TABLE IF NOT EXISTS cars ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "user_id BIGINT NOT NULL, "
                 "car_id INTEGER NOT NULL, "
                 "purchase_date TEXT NOT NULL, "
                 "UNIQUE(user_id, car_id))")
-    database.commit()
-
+    
     # Заполняем таблицу типов бизнесов, если она пустая
     # Заполняем таблицу типов бизнесов, если она пустая
-    sql.execute("SELECT COUNT(*) FROM business_types")
-    if sql.fetchone()[0] == 0:
+    db.execute("SELECT COUNT(*) FROM business_types")
+    if await db.fetchone()[0] == 0:
         businesses = [
             (1, "Комиссионка", "📱", 1000000, 250000, 300000, "Небольшой магазин подержанных товаров"),
             (2, "Забегаловка", "🥙", 3000000, 300000, 500000, "Быстрое питание на каждый день"),
@@ -2238,11 +2328,10 @@ async def new_chat(chat_id=int, peer_id=int, owner_id=int):
             (20, "Международный финансовый холдинг", "🏦", 15000000000, 1800000000, 2200000000, "Финансовые услуги"),
         ]
         for biz in businesses:
-            sql.execute(
+            db.execute(
                 "INSERT INTO business_types (biz_id, name, emoji, price, min_profit, max_profit, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 biz)
-    database.commit()
-
+    
 
 # ================== СИСТЕМА ДОМОВ ==================
 HOUSES_DATA = {
@@ -2318,8 +2407,8 @@ CARS_DATA = {
 async def get_user_houses(user_id: int) -> list:
     """Получить список домов пользователя"""
     try:
-        sql.execute("SELECT * FROM houses WHERE user_id = ? ORDER BY house_id", (user_id,))
-        return sql.fetchall()
+        await db.execute("SELECT * FROM houses WHERE user_id = ? ORDER BY house_id", (user_id,))
+        return await db.fetchall()
     except Exception as e:
         print(f"Ошибка в get_user_houses: {e}")
         return []
@@ -2337,8 +2426,8 @@ async def buy_house(user_id: int, house_id: int) -> dict:
         return {"success": False, "message": "❌ Такого дома не существует!"}
 
     # Проверяем, есть ли уже такой дом
-    sql.execute("SELECT id FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
-    if sql.fetchone():
+    await db.execute("SELECT id FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
+    if await db.fetchone():
         return {"success": False,
                 "message": f"❌ У вас уже есть {HOUSES_DATA[house_id]['emoji']} {HOUSES_DATA[house_id]['name']}!"}
 
@@ -2352,10 +2441,9 @@ async def buy_house(user_id: int, house_id: int) -> dict:
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
     await setmoney(user_id, -price)
 
-    sql.execute("INSERT INTO houses (user_id, house_id, purchase_date) VALUES (?, ?, ?)",
+    await db.execute("INSERT INTO houses (user_id, house_id, purchase_date) VALUES (?, ?, ?)",
                 (user_id, house_id, current_time))
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=price,
                       log=f"купил дом {HOUSES_DATA[house_id]['name']}")
 
@@ -2366,20 +2454,19 @@ async def buy_house(user_id: int, house_id: int) -> dict:
 async def sell_house(user_id: int, house_id: int) -> dict:
     """Продать дом (получить 70% от стоимости)"""
     # Проверяем, есть ли такой дом у пользователя
-    sql.execute("SELECT * FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
-    if not sql.fetchone():
+    await db.execute("SELECT * FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
+    if not await db.fetchone():
         return {"success": False, "message": "❌ У вас нет такого дома!"}
 
     price = HOUSES_DATA[house_id]["price"]
     refund = int(price * 0.7)  # Возвращаем 70%
 
     # Удаляем дом
-    sql.execute("DELETE FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
+    await db.execute("DELETE FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
 
     # Возвращаем деньги
     await setmoney(user_id, refund)
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=refund,
                       log=f"продал дом {HOUSES_DATA[house_id]['name']} за {refund}₽")
 
@@ -2410,8 +2497,8 @@ async def get_most_expensive_house(user_id: int) -> dict:
 async def get_user_cars(user_id: int) -> list:
     """Получить список машин пользователя"""
     try:
-        sql.execute("SELECT * FROM cars WHERE user_id = ? ORDER BY car_id", (user_id,))
-        return sql.fetchall()
+        await db.execute("SELECT * FROM cars WHERE user_id = ? ORDER BY car_id", (user_id,))
+        return await db.fetchall()
     except Exception as e:
         print(f"Ошибка в get_user_cars: {e}")
         return []
@@ -2429,8 +2516,8 @@ async def buy_car(user_id: int, car_id: int) -> dict:
         return {"success": False, "message": "❌ Такой машины не существует!"}
 
     # Проверяем, есть ли уже такая машина
-    sql.execute("SELECT id FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
-    if sql.fetchone():
+    await db.execute("SELECT id FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
+    if await db.fetchone():
         return {"success": False,
                 "message": f"❌ У вас уже есть {CARS_DATA[car_id]['emoji']} {CARS_DATA[car_id]['name']}!"}
 
@@ -2444,10 +2531,9 @@ async def buy_car(user_id: int, car_id: int) -> dict:
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
     await setmoney(user_id, -price)
 
-    sql.execute("INSERT INTO cars (user_id, car_id, purchase_date) VALUES (?, ?, ?)",
+    await db.execute("INSERT INTO cars (user_id, car_id, purchase_date) VALUES (?, ?, ?)",
                 (user_id, car_id, current_time))
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=price,
                       log=f"купил машину {CARS_DATA[car_id]['name']}")
 
@@ -2458,20 +2544,19 @@ async def buy_car(user_id: int, car_id: int) -> dict:
 async def sell_car(user_id: int, car_id: int) -> dict:
     """Продать машину (получить 70% от стоимости)"""
     # Проверяем, есть ли такая машина у пользователя
-    sql.execute("SELECT * FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
-    if not sql.fetchone():
+    await db.execute("SELECT * FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
+    if not await db.fetchone():
         return {"success": False, "message": "❌ У вас нет такой машины!"}
 
     price = CARS_DATA[car_id]["price"]
     refund = int(price * 0.7)  # Возвращаем 70%
 
     # Удаляем машину
-    sql.execute("DELETE FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
+    await db.execute("DELETE FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
 
     # Возвращаем деньги
     await setmoney(user_id, refund)
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=None, amount=refund,
                       log=f"продал машину {CARS_DATA[car_id]['name']} за {refund}₽")
 
@@ -2501,20 +2586,19 @@ async def get_most_expensive_car(user_id: int) -> dict:
 
 
 def ensure_top_whitelist_table():
-    sql.execute("CREATE TABLE IF NOT EXISTS top_whitelist (user_id INTEGER PRIMARY KEY)")
-    database.commit()
-
+    db.execute("CREATE TABLE IF NOT EXISTS top_whitelist (user_id INTEGER PRIMARY KEY)")
+    
 
 async def get_top_excluded_ids() -> set:
-    excluded = set(await ruklist() or [])
+    excluded = set(await cached_ruklist() or [])
     try:
-        sql.execute("SELECT user_id FROM global_managers WHERE level >= 1")
-        excluded.update(row[0] for row in sql.fetchall())
-    except sqlite3.Error:
+        await db.execute("SELECT user_id FROM global_managers WHERE level >= 1")
+        excluded.update(row[0] for row in await db.fetchall())
+    except Exception:
         pass
     ensure_top_whitelist_table()
-    sql.execute("SELECT user_id FROM top_whitelist")
-    excluded.update(row[0] for row in sql.fetchall())
+    await db.execute("SELECT user_id FROM top_whitelist")
+    excluded.update(row[0] for row in await db.fetchall())
     return excluded
 
 # ================== ФУНКЦИИ ДЛЯ ТОПА ИМУЩЕСТВА ==================
@@ -2536,8 +2620,8 @@ async def calculate_user_wealth(user_id: int) -> int:
 async def top_wealth(limit: int = 10) -> str:
     """Топ 10 самых богатых игроков по общему состоянию"""
     # Получаем всех пользователей с балансом
-    sql.execute("SELECT DISTINCT user_id FROM balance")
-    users = sql.fetchall()
+    await db.execute("SELECT DISTINCT user_id FROM balance")
+    users = await db.fetchall()
 
     wealth_list = []
     excluded_users = await get_top_excluded_ids()
@@ -2568,8 +2652,8 @@ async def top_wealth(limit: int = 10) -> str:
 async def get_user_job(user_id: int) -> dict:
     """Получить информацию о работе пользователя"""
     try:
-        sql.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        await db.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
+        fetch = await db.fetchone()
         if fetch:
             return {
                 "job_id": fetch[0],
@@ -2585,8 +2669,8 @@ async def get_user_job(user_id: int) -> dict:
 async def check_work(user_id: int) -> tuple:
     """Проверка, может ли пользователь работать сейчас"""
     try:
-        sql.execute("SELECT last_work_time FROM jobs WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        await db.execute("SELECT last_work_time FROM jobs WHERE user_id = ?", (user_id,))
+        fetch = await db.fetchone()
 
         if not fetch or not fetch[0]:
             return True, 0, 0
@@ -2614,8 +2698,8 @@ async def set_user_job(user_id: int, job_id: int):
     """Установить работу пользователю с сохранением навыка"""
     try:
         # Проверяем, есть ли уже запись
-        sql.execute("SELECT skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
-        fetch = sql.fetchone()
+        await db.execute("SELECT skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
+        fetch = await db.fetchone()
 
         current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
@@ -2623,13 +2707,12 @@ async def set_user_job(user_id: int, job_id: int):
             # Сохраняем текущий навык, но обновляем работу
             current_skill = fetch[0] if fetch[0] is not None else 0
             last_work_time = fetch[1]  # Сохраняем время последней работы!
-            sql.execute("UPDATE jobs SET job_id = ?, skill = ?, last_work_time = ? WHERE user_id = ?",
+            await db.execute("UPDATE jobs SET job_id = ?, skill = ?, last_work_time = ? WHERE user_id = ?",
                         (job_id, current_skill, last_work_time, user_id))
         else:
             # Новая запись
-            sql.execute("INSERT INTO jobs (user_id, job_id, skill, last_work_time) VALUES (?, ?, 0, ?)",
+            await db.execute("INSERT INTO jobs (user_id, job_id, skill, last_work_time) VALUES (?, ?, 0, ?)",
                         (user_id, job_id, current_time))
-        database.commit()
     except Exception as e:
         print(f"Ошибка в set_user_job для user_id {user_id}: {e}")
 
@@ -2637,13 +2720,12 @@ async def set_user_job(user_id: int, job_id: int):
 async def update_clan_battles_table():
     """Обновляет таблицу clan_battles, добавляя колонку created_at"""
     try:
-        sql.execute("PRAGMA table_info(clan_battles)")
-        columns = sql.fetchall()
+        await db.execute("PRAGMA table_info(clan_battles)")
+        columns = await db.fetchall()
         column_names = [col[1] for col in columns]
 
         if 'created_at' not in column_names:
-            sql.execute("ALTER TABLE clan_battles ADD COLUMN created_at TEXT")
-            database.commit()
+            await db.execute("ALTER TABLE clan_battles ADD COLUMN created_at TEXT")
             print("Добавлена колонка created_at в clan_battles")
 
         print("✅ Таблица clan_battles обновлена!")
@@ -2653,8 +2735,7 @@ async def update_clan_battles_table():
 async def update_user_skill(user_id: int, skill_gain: int):
     """Обновить навык пользователя"""
     try:
-        sql.execute("UPDATE jobs SET skill = skill + ? WHERE user_id = ?", (skill_gain, user_id))
-        database.commit()
+        await db.execute("UPDATE jobs SET skill = skill + ? WHERE user_id = ?", (skill_gain, user_id))
     except Exception as e:
         print(f"Ошибка в update_user_skill для user_id {user_id}: {e}")
 
@@ -2663,8 +2744,7 @@ async def update_last_work_time(user_id: int):
     """Обновить время последней работы"""
     try:
         current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        sql.execute("UPDATE jobs SET last_work_time = ? WHERE user_id = ?", (current_time, user_id))
-        database.commit()
+        await db.execute("UPDATE jobs SET last_work_time = ? WHERE user_id = ?", (current_time, user_id))
     except Exception as e:
         print(f"Ошибка в update_last_work_time для user_id {user_id}: {e}")
 
@@ -2672,14 +2752,14 @@ async def update_last_work_time(user_id: int):
 async def get_user_skill(user_id: int) -> int:
     """Получить сохранённый навык пользователя"""
     # Сначала проверяем в таблице jobs
-    sql.execute("SELECT skill FROM jobs WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    await db.execute("SELECT skill FROM jobs WHERE user_id = ?", (user_id,))
+    fetch = await db.fetchone()
     if fetch:
         return fetch[0]
 
     # Если нет, проверяем в таблице сохранённых навыков
-    sql.execute("SELECT skill FROM user_skills WHERE user_id = ?", (user_id,))
-    fetch = sql.fetchone()
+    await db.execute("SELECT skill FROM user_skills WHERE user_id = ?", (user_id,))
+    fetch = await db.fetchone()
     if fetch:
         return fetch[0]
 
@@ -2718,8 +2798,7 @@ async def can_work(user_id: int) -> tuple:
 async def fire_user(user_id: int):
     """Уволить пользователя"""
     try:
-        sql.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
-        database.commit()
+        await db.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
     except Exception as e:
         print(f"Ошибка в fire_user для user_id {user_id}: {e}")
 
@@ -2739,8 +2818,8 @@ async def get_jobs_list() -> str:
 
 async def get_user_data1(user_id: int):
     """Получить дату окончания VIP статуса из БД"""
-    sql.execute(f"SELECT date_string FROM vip WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT date_string FROM vip WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch:
         return fetch[0]
     else:
@@ -2763,8 +2842,8 @@ async def is_vip_active(user_id: int):
 
 async def set_user_date(user_id: int, days: int):
     """Установить/обновить дату окончания VIP статуса"""
-    sql.execute(f"SELECT date_string FROM vip WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT date_string FROM vip WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
 
     current_date = moscow_now()
 
@@ -2783,25 +2862,23 @@ async def set_user_date(user_id: int, days: int):
     date_string = new_end_date.strftime('%Y-%m-%d %H:%M:%S.%f')
 
     if fetch:
-        sql.execute(f"UPDATE vip SET date_string = ? WHERE user_id = ?", (date_string, user_id))
+        await db.execute(f"UPDATE vip SET date_string = ? WHERE user_id = ?", (date_string, user_id))
     else:
-        sql.execute(f"INSERT INTO vip VALUES (?,?)", (user_id, date_string))
+        await db.execute(f"INSERT INTO vip VALUES (?,?)", (user_id, date_string))
     await log_economy(user_id=user_id, target_id=None, amount=None,
                       log=f"получил(+а) VIP на {days} дней")
 
-    database.commit()
     return date_string
 
 
 async def get_user_data(user_id):
-    sql.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = sql.fetchone()
+    await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user = await db.fetchone()
 
     if user is None:
         # Узнайте, какие именно колонки в вашей таблице users
         # Пример: если колонки (id, last_bonus, balance)
-        sql.execute("INSERT INTO users VALUES (?, ?)", (user_id, 0))  # Последнее значение - начальный баланс
-        database.commit()
+        await db.execute("INSERT INTO users VALUES (?, ?)", (user_id, 0))  # Последнее значение - начальный баланс
         return 0
     else:
         # Возвращаем last_bonus (предполагая, что это вторая колонка)
@@ -2809,38 +2886,34 @@ async def get_user_data(user_id):
 
 
 async def ensure_column_exists(table_name, column_name, column_type="INTEGER"):
-    sql.execute(f"PRAGMA table_info({table_name})")
-    columns = sql.fetchall()
+    await db.execute(f"PRAGMA table_info({table_name})")
+    columns = await db.fetchall()
     column_names = [col[1] for col in columns]
     if column_name not in column_names:
         print(f"Колонка '{column_name}' не найдена в таблице '{table_name}'. Создаем...")
         try:
-            sql.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
             print(f"Колонка '{column_name}' успешно создана.")
-            database.commit()
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             print(f"Ошибка при создании колонки '{column_name}': {e}")
-            database.rollback()
     else:
         print(f"Колонка '{column_name}' уже существует в таблице '{table_name}'. Ничего не делаем.")
 
 
 async def ensure_column_delete(table_name=str):
     print(1, table_name)
-    sql.execute(f"DELETE FROM promo WHERE promo = ?", (table_name,))
+    await db.execute(f"DELETE FROM promo WHERE promo = ?", (table_name,))
     print(f"Колонка '{table_name}' успешно удалена.")
-    database.commit()
-
+    
 
 async def update_last_bonus_time(user_id: int):
     """Обновить время последнего получения бонуса"""
-    sql.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (moscow_now(), user_id))
-    database.commit()
-
+    await db.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (moscow_now(), user_id))
+    
 
 async def get_blago(user_id=int):
-    sql.execute(f"SELECT blago FROM balance WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT blago FROM balance WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2848,8 +2921,8 @@ async def get_blago(user_id=int):
 
 
 async def get_bank(user_id=int):
-    sql.execute(f"SELECT bank FROM balance WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT bank FROM balance WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2857,8 +2930,8 @@ async def get_bank(user_id=int):
 
 
 async def get_balance(user_id=int):
-    sql.execute(f"SELECT money FROM balance WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT money FROM balance WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2866,8 +2939,8 @@ async def get_balance(user_id=int):
 
 
 async def get_duelwin(user_id=int):
-    sql.execute(f"SELECT money FROM duelwin WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT money FROM duelwin WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2875,8 +2948,8 @@ async def get_duelwin(user_id=int):
 
 
 async def get_duelunwin(user_id=int):
-    sql.execute(f"SELECT money FROM duelunallwin WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT money FROM duelunallwin WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2884,8 +2957,8 @@ async def get_duelunwin(user_id=int):
 
 
 async def get_duelwinid(user_id=int):
-    sql.execute(f"SELECT id FROM duelwin WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT id FROM duelwin WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2893,8 +2966,8 @@ async def get_duelwinid(user_id=int):
 
 
 async def get_duelunwinid(user_id=int):
-    sql.execute(f"SELECT id FROM duelunallwin WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT id FROM duelunallwin WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2917,32 +2990,31 @@ async def get_user_name(user_id=int):
 
 
 async def is_nick(user_id=int, chat_id=int):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    if sql.fetchone() == None:
+    await db.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
+    if await db.fetchone() == None:
         return False
     else:
         return True
 
 
 async def setpromo5(user_id=int, new_blago=int):
-    sql.execute(f"INSERT INTO usprom(user_id, promo) VALUES (?, ?)", (user_id, new_blago))
-    database.commit()
-
+    await db.execute(f"INSERT INTO usprom(user_id, promo) VALUES (?, ?)", (user_id, new_blago))
+    
 
 async def getpromo5(user_id=int, promo=str):
     try:
         print(101)
         print(user_id, promo)
         query = 'SELECT 1 FROM usprom WHERE user_id = ? AND promo = ?'
-        sql.execute(query, (user_id, promo))
-        fetch = sql.fetchone()
+        await db.execute(query, (user_id, promo))
+        fetch = await db.fetchone()
         print(fetch)
         print(1)
         if fetch:
             return 1
         else:
             return 2
-    except sqlite3.Error as e:
+    except Exception as e:
         print(f'Ошибка бд {e}')
         return 2
     except Exception as e:
@@ -2951,23 +3023,21 @@ async def getpromo5(user_id=int, promo=str):
 
 
 async def setblago(user_id=int, new_blago=int):
-    sql.execute(f"SELECT blago FROM balance WHERE user_id = {user_id}")
-    result = sql.fetchone()
+    await db.execute(f"SELECT blago FROM balance WHERE user_id = {user_id}")
+    result = await db.fetchone()
     print(result)
     if result is None:
-        sql.execute(f"INSERT INTO balance(user_id, blago) VALUES (?, ?)", (user_id, new_blago))
-        database.commit()
+        await db.execute(f"INSERT INTO balance(user_id, blago) VALUES (?, ?)", (user_id, new_blago))
     else:
         current_money = result[0]
         updated_money = current_money + new_blago
         print(updated_money)
-        sql.execute(f"UPDATE balance SET blago = ? WHERE user_id = ?", (updated_money, user_id,))
-        database.commit()
-
+        await db.execute(f"UPDATE balance SET blago = ? WHERE user_id = ?", (updated_money, user_id,))
+        
 
 async def getgame(chat_id=int):
-    sql.execute(f"SELECT game FROM chats WHERE chat_id = {chat_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT game FROM chats WHERE chat_id = {chat_id}")
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2976,8 +3046,8 @@ async def getgame(chat_id=int):
 
 async def getpromo(promo=str):
     sql_query = "SELECT promo FROM promo WHERE promo = ?"
-    sql.execute(sql_query, (promo,))
-    fetch = sql.fetchone()
+    await db.execute(sql_query, (promo,))
+    fetch = await db.fetchone()
     print(fetch)
     if fetch == None:
         return 0
@@ -2987,8 +3057,8 @@ async def getpromo(promo=str):
 
 async def getpromo1(promo=str):
     sql_query = "SELECT status FROM promo WHERE promo = ?"
-    sql.execute(sql_query, (promo,))
-    fetch = sql.fetchone()
+    await db.execute(sql_query, (promo,))
+    fetch = await db.fetchone()
     if fetch == None:
         return 0
     else:
@@ -2997,8 +3067,8 @@ async def getpromo1(promo=str):
 
 async def getpromo2(promo=str):
     sql_query = "SELECT vip FROM promo WHERE promo = ?"
-    sql.execute(sql_query, (promo,))
-    fetch = sql.fetchone()
+    await db.execute(sql_query, (promo,))
+    fetch = await db.fetchone()
     print(fetch)
     if fetch == None:
         return 0
@@ -3008,8 +3078,8 @@ async def getpromo2(promo=str):
 
 async def getpromo3(promo=str):
     sql_query = "SELECT money FROM promo WHERE promo = ?"
-    sql.execute(sql_query, (promo,))
-    fetch = sql.fetchone()
+    await db.execute(sql_query, (promo,))
+    fetch = await db.fetchone()
     if fetch is None:
         return 0
     else:
@@ -3018,85 +3088,81 @@ async def getpromo3(promo=str):
 
 async def setpromo(promo=str, status=str, vip=int, money=int):
     sql_query = "SELECT promo FROM promo WHERE promo = ?"
-    sql.execute(sql_query, (promo,))
-    result = sql.fetchone()
+    await db.execute(sql_query, (promo,))
+    result = await db.fetchone()
     print(result)
     if result is None:
-        sql.execute(f"INSERT INTO promo VALUES (?, ?, ?, ?)", (promo, status, vip, money))
-        database.commit()
+        await db.execute(f"INSERT INTO promo VALUES (?, ?, ?, ?)", (promo, status, vip, money))
     else:
-        sql.execute(f"UPDATE promo SET status = ?, vip = ?, money = ? WHERE promo = ?", (status, vip, money, promo,))
-        database.commit()
-
+        await db.execute(f"UPDATE promo SET status = ?, vip = ?, money = ? WHERE promo = ?", (status, vip, money, promo,))
+        
 
 async def setgame(chat_id=int, id=int):
-    sql.execute(f"SELECT game FROM chats WHERE chat_id = {chat_id}")
-    result = sql.fetchone()
+    await db.execute(f"SELECT game FROM chats WHERE chat_id = {chat_id}")
+    result = await db.fetchone()
     print(result)
     if result != 0:
-        sql.execute(f"UPDATE chats SET game = ? WHERE chat_id = ?", (id, chat_id,))
-        database.commit()
+        await db.execute(f"UPDATE chats SET game = ? WHERE chat_id = ?", (id, chat_id,))
         print(1)
     else:
-        sql.execute(f"UPDATE chats SET game = ? WHERE chat_id = ?", (id, chat_id,))
-        database.commit()
-
+        await db.execute(f"UPDATE chats SET game = ? WHERE chat_id = ?", (id, chat_id,))
+    # ОПТИМИЗАЦИЯ: инвалидация кэша game
+    invalidate_data_cache([f"game:{chat_id}"])
+        
 
 async def setmoney(user_id=int, new_money=int):
-    sql.execute(f"SELECT money FROM balance WHERE user_id = {user_id}")
-    result = sql.fetchone()
+    await db.execute(f"SELECT money FROM balance WHERE user_id = {user_id}")
+    result = await db.fetchone()
     print(result)
     if result is None:
-        sql.execute(f"INSERT INTO balance(user_id, money) VALUES (?, ?)", (user_id, new_money))
-        database.commit()
+        await db.execute(f"INSERT INTO balance(user_id, money) VALUES (?, ?)", (user_id, new_money))
     else:
         current_money = result[0]
         updated_money = current_money + new_money
         print(updated_money)
-        sql.execute(f"UPDATE balance SET money = ? WHERE user_id = ?", (updated_money, user_id,))
-        database.commit()
-
+        await db.execute(f"UPDATE balance SET money = ? WHERE user_id = ?", (updated_money, user_id,))
+        
 
 async def delmoney(user_id=int):
-    sql.execute("DELETE FROM balance WHERE user_id = ?", (user_id,))
-    database.commit()
-
+    await db.execute("DELETE FROM balance WHERE user_id = ?", (user_id,))
+    # ОПТИМИЗАЦИЯ: инвалидация кэша баланса
+    invalidate_data_cache([f"balance:{user_id}"])
+    
 
 async def setbank(user_id=int, new_money=int):
-    sql.execute(f"SELECT bank FROM balance WHERE user_id = {user_id}")
-    result = sql.fetchone()
+    await db.execute(f"SELECT bank FROM balance WHERE user_id = {user_id}")
+    result = await db.fetchone()
     print(result)
     if result is None:
-        sql.execute(f"INSERT INTO balance(user_id, bank) VALUES (?, ?)", (user_id, new_money))
-        database.commit()
+        await db.execute(f"INSERT INTO balance(user_id, bank) VALUES (?, ?)", (user_id, new_money))
     else:
         current_money = result[0]
         updated_money = current_money + new_money
         print(updated_money)
-        sql.execute(f"UPDATE balance SET bank = ? WHERE user_id = ?", (updated_money, user_id,))
-        database.commit()
-
+        await db.execute(f"UPDATE balance SET bank = ? WHERE user_id = ?", (updated_money, user_id,))
+    # ОПТИМИЗАЦИЯ: инвалидация кэша баланса после изменения
+    invalidate_data_cache([f"balance:{user_id}"])
+        
 
 async def rename_clan(clan_id: int, new_name: str, new_tag: str = None) -> dict:
     """Изменить название и/или тег клана"""
     try:
         if new_tag:
             # Проверяем уникальность тега
-            sql.execute("SELECT clan_id FROM clans WHERE tag = ? AND clan_id != ?", (new_tag, clan_id))
-            if sql.fetchone():
+            await db.execute("SELECT clan_id FROM clans WHERE tag = ? AND clan_id != ?", (new_tag, clan_id))
+            if await db.fetchone():
                 return {"success": False, "message": "Клан с таким тегом уже существует!"}
 
-            sql.execute("UPDATE clans SET tag = ? WHERE clan_id = ?", (new_tag, clan_id))
+            await db.execute("UPDATE clans SET tag = ? WHERE clan_id = ?", (new_tag, clan_id))
 
         if new_name:
             # Проверяем уникальность названия
-            sql.execute("SELECT clan_id FROM clans WHERE name = ? AND clan_id != ?", (new_name, clan_id))
-            if sql.fetchone():
+            await db.execute("SELECT clan_id FROM clans WHERE name = ? AND clan_id != ?", (new_name, clan_id))
+            if await db.fetchone():
                 return {"success": False, "message": "Клан с таким названием уже существует!"}
 
-            sql.execute("UPDATE clans SET name = ? WHERE clan_id = ?", (new_name, clan_id))
+            await db.execute("UPDATE clans SET name = ? WHERE clan_id = ?", (new_name, clan_id))
 
-        database.commit()
         return {"success": True, "message": "Название клана успешно изменено!"}
     except Exception as e:
         print(f"Ошибка при изменении названия клана: {e}")
@@ -3108,13 +3174,11 @@ async def duelwin(user_id=int, money=int):
     money = int(money)
     id = await get_duelwinid(user_id)
     if moneyall > 1:
-        sql.execute(f"INSERT INTO duelwin VALUES (?, ?, ?)",
+        await db.execute(f"INSERT INTO duelwin VALUES (?, ?, ?)",
                     (user_id, moneyall + money, id + 1))
-        database.commit()
-    if moneyall < 1:
-        sql.execute(f"INSERT INTO duelwin VALUES (?, ?, ?)",
+    else:
+        await db.execute(f"INSERT INTO duelwin VALUES (?, ?, ?)",
                     (user_id, money, 1))
-        database.commit()
         return 1
 
 
@@ -3123,21 +3187,19 @@ async def duelunwin(user_id=int, money=int):
     money = int(money)
     id = await get_duelunwinid(user_id)
     if moneyall > 1:
-        sql.execute(f"INSERT INTO duelunallwin VALUES (?, ?, ?)",
+        await db.execute(f"INSERT INTO duelunallwin VALUES (?, ?, ?)",
                     (user_id, moneyall + money, id + 1))
-        database.commit()
-    if moneyall < 1:
-        sql.execute(f"INSERT INTO duelunallwin VALUES (?, ?, ?)",
+    else:
+        await db.execute(f"INSERT INTO duelunallwin VALUES (?, ?, ?)",
                     (user_id, money, 1))
-        database.commit()
         return 1
 
 
 async def gcheckpromo(message):
     allpromo = []
     try:
-        sql.execute("SELECT * FROM promo")
-        fetch = sql.fetchall()
+        await db.execute("SELECT * FROM promo")
+        fetch = await db.fetchall()
         print(6, fetch)
         for row in fetch:
             a = row[0]
@@ -3178,15 +3240,15 @@ async def get_chat_title(bot: Bot, peer_id: int) -> str or None:
 
 
 async def get_user_nam(user_id=int, chat_id=int):
-    sql.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
-    fetch = sql.fetchone()
+    await db.execute(f"SELECT nick FROM nicks_{chat_id} WHERE user_id = {user_id}")
+    fetch = await db.fetchone()
     if not fetch == None:
         return fetch[0]
 
 
 async def get_all_peerids():
-    sql.execute("SELECT peer_id FROM chats")
-    fetch = sql.fetchall()
+    await db.execute("SELECT peer_id FROM chats")
+    fetch = await db.fetchall()
     peer_ids = []
     for i in fetch:
         peer_ids.append(i[0])
@@ -3195,18 +3257,18 @@ async def get_all_peerids():
 
 async def topblago():
     # Получаем список админов
-    a = await ruklist()
+    a = await cached_ruklist()
     admin_ids = a if a else []
     
     # Получаем пользователей с глобальными ролями
-    sql.execute("SELECT user_id FROM global_managers WHERE level >= 1")
-    global_roles = sql.fetchall()
+    await db.execute("SELECT user_id FROM global_managers WHERE level >= 1")
+    global_roles = await db.fetchall()
     global_ids = [row[0] for row in global_roles] if global_roles else []
     
     # Объединяем оба списка
     ensure_top_whitelist_table()
-    sql.execute("SELECT user_id FROM top_whitelist")
-    whitelist_ids = [row[0] for row in sql.fetchall()]
+    await db.execute("SELECT user_id FROM top_whitelist")
+    whitelist_ids = [row[0] for row in await db.fetchall()]
     excluded_user_ids = list(set(admin_ids + global_ids + whitelist_ids))
     
     if not excluded_user_ids:
@@ -3214,7 +3276,7 @@ async def topblago():
                     SELECT user_id, blago FROM balance
                     ORDER BY blago DESC LIMIT 10
                 '''
-        sql.execute(query)
+        await db.execute(query)
     else:
         placeholders = ", ".join("?" * len(excluded_user_ids))
         query = f'''
@@ -3222,8 +3284,8 @@ async def topblago():
                     WHERE user_id NOT IN ({placeholders})
                     ORDER BY blago DESC LIMIT 10
                 '''
-        sql.execute(query, tuple(excluded_user_ids))
-    top_10 = sql.fetchall()
+        await db.execute(query, tuple(excluded_user_ids))
+    top_10 = await db.fetchall()
     
     result = '👾 Топ благотворительности:\n\n'
     
@@ -3244,18 +3306,20 @@ async def delete_message(group_id=int, peer_id=int, cmid=int):
 
 
 async def addruk(user_id=int):
-    sql.execute(f"INSERT INTO ruk VALUES (?)", (user_id,))
-    database.commit()
-
+    await db.execute(f"INSERT INTO ruk VALUES (?)", (user_id,))
+    # ОПТИМИЗАЦИЯ: инвалидация кэша ruklist
+    invalidate_ruklist_cache()
+    
 
 async def delruk(user_id=int):
-    sql.execute(f"DELETE FROM ruk WHERE user_id = {user_id}")
-    database.commit()
-
+    await db.execute(f"DELETE FROM ruk WHERE user_id = {user_id}")
+    # ОПТИМИЗАЦИЯ: инвалидация кэша ruklist
+    invalidate_ruklist_cache()
+    
 
 async def ruklist():
-    sql.execute(f"SELECT * FROM ruk")
-    fetch = sql.fetchall()
+    await db.execute(f"SELECT * FROM ruk")
+    fetch = await db.fetchall()
     if fetch:
         ids_list = [item[0] for item in fetch]
         idstuple = tuple(ids_list)
@@ -3265,18 +3329,18 @@ async def ruklist():
 
 async def topbalance():
     # Получаем список админов
-    a = await ruklist()
+    a = await cached_ruklist()
     admin_ids = a if a else []
     
     # Получаем пользователей с глобальными ролями
-    sql.execute("SELECT user_id FROM global_managers WHERE level >= 1")
-    global_roles = sql.fetchall()
+    await db.execute("SELECT user_id FROM global_managers WHERE level >= 1")
+    global_roles = await db.fetchall()
     global_ids = [row[0] for row in global_roles] if global_roles else []
     
     # Объединяем оба списка
     ensure_top_whitelist_table()
-    sql.execute("SELECT user_id FROM top_whitelist")
-    whitelist_ids = [row[0] for row in sql.fetchall()]
+    await db.execute("SELECT user_id FROM top_whitelist")
+    whitelist_ids = [row[0] for row in await db.fetchall()]
     excluded_user_ids = list(set(admin_ids + global_ids + whitelist_ids))
     
     if not excluded_user_ids:
@@ -3284,7 +3348,7 @@ async def topbalance():
                 SELECT user_id, money, bank FROM balance
                 ORDER BY money DESC LIMIT 10
             '''
-        sql.execute(query)
+        await db.execute(query)
     else:
         placeholders = ", ".join("?" * len(excluded_user_ids))
         query = f'''
@@ -3292,8 +3356,8 @@ async def topbalance():
                 WHERE user_id NOT IN ({placeholders})
                 ORDER BY money DESC LIMIT 10
             '''
-        sql.execute(query, tuple(excluded_user_ids))
-    top_10 = sql.fetchall()
+        await db.execute(query, tuple(excluded_user_ids))
+    top_10 = await db.fetchall()
     
     result = '💰 Самые богатые пользователи:\n\n'
     
@@ -3313,16 +3377,16 @@ async def topbalance():
         vip_emoji = "⭐" if vip_active else ""
         
         # Получаем количество бизнесов
-        sql.execute("SELECT COUNT(*) FROM user_businesses WHERE user_id = ?", (user_id,))
-        businesses_count = sql.fetchone()[0]
+        await db.execute("SELECT COUNT(*) FROM user_businesses WHERE user_id = ?", (user_id,))
+        businesses_count = await db.fetchone()[0]
         
         # Получаем количество домов
-        sql.execute("SELECT COUNT(*) FROM houses WHERE user_id = ?", (user_id,))
-        houses_count = sql.fetchone()[0]
+        await db.execute("SELECT COUNT(*) FROM houses WHERE user_id = ?", (user_id,))
+        houses_count = await db.fetchone()[0]
         
         # Получаем количество машин
-        sql.execute("SELECT COUNT(*) FROM cars WHERE user_id = ?", (user_id,))
-        cars_count = sql.fetchone()[0]
+        await db.execute("SELECT COUNT(*) FROM cars WHERE user_id = ?", (user_id,))
+        cars_count = await db.fetchone()[0]
         
         # Формируем строку топа
         result += f'Топ: {i + 1} 👑: {user_mention} | {money_formatted}₽\n\n'
@@ -3343,13 +3407,13 @@ async def user_joined(message: Message) -> None:
     user_id = message.from_id
     chat_id = message.chat_id
     if invited_user == -236475011:
-        print([photo1])
         try:
             await message.answer(
                 "Бот успешно добавлен в беседу!\nДля его активации в беседе напишите /start!",
-                attachment=[photo1])
+                attachment=photo1)
         except Exception as e:
             print(e)
+    return True
 
 
 def save_data(file, data):
@@ -3379,13 +3443,12 @@ balances = load_data(BALANCES_FILE)
 async def update_clan_battles_table():
     """Обновляет таблицу clan_battles, добавляя колонку created_at"""
     try:
-        sql.execute("PRAGMA table_info(clan_battles)")
-        columns = sql.fetchall()
+        await db.execute("PRAGMA table_info(clan_battles)")
+        columns = await db.fetchall()
         column_names = [col[1] for col in columns]
 
         if 'created_at' not in column_names:
-            sql.execute("ALTER TABLE clan_battles ADD COLUMN created_at TEXT")
-            database.commit()
+            await db.execute("ALTER TABLE clan_battles ADD COLUMN created_at TEXT")
             print("Добавлена колонка created_at в clan_battles")
 
         print("✅ Таблица clan_battles обновлена!")
@@ -3563,7 +3626,7 @@ async def handle_all_callbacks(message):
         return  # Игнорируем административные команды
 
     # Получаем список админов для проверки прав
-    admin_list = await ruklist()
+    admin_list = await cached_ruklist()
 
     # --- ОБРАБОТКА ДУЭЛЕЙ ---
     if command == "duel_join" or payload.get('cmd') == "duel_join":
@@ -3589,8 +3652,8 @@ async def handle_all_callbacks(message):
             return
 
         # Проверяем существование сражения
-        sql.execute("SELECT * FROM clan_battles WHERE battle_id = ?", (battle_id,))
-        battle = sql.fetchone()
+        await db.execute("SELECT * FROM clan_battles WHERE battle_id = ?", (battle_id,))
+        battle = await db.fetchone()
 
         if not battle:
             await bot.api.messages.send_message_event_answer(
@@ -3601,8 +3664,7 @@ async def handle_all_callbacks(message):
             )
             return
 
-        columns = [description[0] for description in sql.description]
-        battle_data = dict(zip(columns, battle))
+        battle_data = dict(battle)
 
         if battle_data["status"] != "pending":
             await bot.api.messages.send_message_event_answer(
@@ -3642,8 +3704,8 @@ async def handle_all_callbacks(message):
                 )
             else:
                 # Получаем текущий счёт
-                sql.execute("SELECT clan1_score, clan2_score FROM clan_wars WHERE war_id = ?", (battle_data["war_id"],))
-                scores = sql.fetchone()
+                db.execute("SELECT clan1_score, clan2_score FROM clan_wars WHERE war_id = ?", (battle_data["war_id"],))
+                scores = await db.fetchone()
                 result_text += f"📊 Текущий счёт: {scores[0]} : {scores[1]}"
 
             await bot.api.messages.send(
@@ -3683,7 +3745,7 @@ async def handle_all_callbacks(message):
 
     if command == "economyminus":
         chat_id = message.object.peer_id - 2000000000
-        a = await ruklist()
+        a = await cached_ruklist()
         excluded_user_ids = a
         if user_id not in excluded_user_ids:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
             await bot.api.messages.send_message_event_answer(
@@ -3707,12 +3769,12 @@ async def handle_all_callbacks(message):
             return
 
         if target:
-            sql.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999",
+            db.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999",
                         (target,))
-            logs = sql.fetchall()
+            logs = await db.fetchall()
         else:
-            sql.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
-            logs = sql.fetchall()
+            db.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
+            logs = await db.fetchall()
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -3788,7 +3850,7 @@ async def handle_all_callbacks(message):
     # Команда economyplus
     if command == "economyplus":
         chat_id = message.object.peer_id - 2000000000
-        a = await ruklist()
+        a = await cached_ruklist()
         excluded_user_ids = a
         if user_id not in excluded_user_ids:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
             await bot.api.messages.send_message_event_answer(
@@ -3803,12 +3865,12 @@ async def handle_all_callbacks(message):
         target = payload.get("target")
 
         if target:
-            sql.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999",
+            db.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999",
                         (target,))
-            logs = sql.fetchall()
+            logs = await db.fetchall()
         else:
-            sql.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
-            logs = sql.fetchall()
+            db.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
+            logs = await db.fetchall()
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -3890,7 +3952,7 @@ async def handle_all_callbacks(message):
     # Команда economyallminus
     if command == "economyallminus":
         chat_id = message.object.peer_id - 2000000000
-        a = await ruklist()
+        a = await cached_ruklist()
         excluded_user_ids = a
         if user_id not in excluded_user_ids:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
             await bot.api.messages.send_message_event_answer(
@@ -3912,8 +3974,8 @@ async def handle_all_callbacks(message):
             )
             return
 
-        sql.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
-        logs = sql.fetchall()
+        db.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
+        logs = await db.fetchall()
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -3977,7 +4039,7 @@ async def handle_all_callbacks(message):
     # Команда economyallplus
     if command == "economyallplus":
         chat_id = message.object.peer_id - 2000000000
-        a = await ruklist()
+        a = await cached_ruklist()
         excluded_user_ids = a
         if user_id not in excluded_user_ids:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
             await bot.api.messages.send_message_event_answer(
@@ -3990,8 +4052,8 @@ async def handle_all_callbacks(message):
 
         page = payload.get("page")
 
-        sql.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
-        logs = sql.fetchall()
+        db.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
+        logs = await db.fetchall()
 
         total = len(logs)
         per_page = MAX_LOGS
@@ -4580,7 +4642,7 @@ async def handle_all_callbacks(message):
         return
 
     if command == "clear":
-        a = await ruklist()
+        a = await cached_ruklist()
         excluded_user_ids = a
         if user_id not in excluded_user_ids:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
             await bot.api.messages.send_message_event_answer(
@@ -4632,32 +4694,31 @@ async def create_marriage_proposal(from_id: int, to_id: int) -> dict:
         return {"success": False, "message": "Нельзя жениться на самом себе!"}
 
     # Проверяем, есть ли уже активное предложение
-    sql.execute("""
+    await db.execute("""
         SELECT proposal_id FROM marriage_proposals 
         WHERE ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)) 
         AND status = 'pending'
     """, (from_id, to_id, to_id, from_id))
 
-    if sql.fetchone():
+    if await db.fetchone():
         return {"success": False, "message": "Предложение уже отправлено!"}
 
     # Создаём предложение
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO marriage_proposals (from_id, to_id, proposal_date, status)
         VALUES (?, ?, ?, 'pending')
     """, (from_id, to_id, current_time))
 
     proposal_id = sql.lastrowid
-    database.commit()
-
+    
     return {"success": True, "proposal_id": proposal_id, "message": "Предложение отправлено!"}
 
 
 async def get_user_proposals(user_id: int) -> list:
     """Получить все активные предложения пользователя"""
-    sql.execute("""
+    await db.execute("""
         SELECT mp.*, 
                u1.user_name as from_name,
                u2.user_name as to_name
@@ -4668,20 +4729,19 @@ async def get_user_proposals(user_id: int) -> list:
         ORDER BY mp.proposal_date DESC
     """, (user_id, user_id))
 
-    return sql.fetchall()
+    return await db.fetchall()
 
 
 async def accept_marriage_proposal(proposal_id: int, user_id: int) -> dict:
     """Принять предложение брака"""
     # Получаем информацию о предложении
-    sql.execute("SELECT * FROM marriage_proposals WHERE proposal_id = ? AND status = 'pending'", (proposal_id,))
-    proposal = sql.fetchone()
+    await db.execute("SELECT * FROM marriage_proposals WHERE proposal_id = ? AND status = 'pending'", (proposal_id,))
+    proposal = await db.fetchone()
 
     if not proposal:
         return {"success": False, "message": "Предложение не найдено!"}
 
-    columns = [description[0] for description in sql.description]
-    proposal_data = dict(zip(columns, proposal))
+    proposal_data = dict(proposal)
 
     # Проверяем, что принимает именно тот, кому предложили
     if proposal_data["to_id"] != user_id:
@@ -4697,7 +4757,7 @@ async def accept_marriage_proposal(proposal_id: int, user_id: int) -> dict:
     # Создаём брак
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         INSERT INTO marriages (user1_id, user2_id, proposal_date, marriage_date, status, initiator_id)
         VALUES (?, ?, ?, ?, 'accepted', ?)
     """, (proposal_data["from_id"], proposal_data["to_id"],
@@ -4706,10 +4766,9 @@ async def accept_marriage_proposal(proposal_id: int, user_id: int) -> dict:
     marriage_id = sql.lastrowid
 
     # Обновляем статус предложения
-    sql.execute("UPDATE marriage_proposals SET status = 'accepted' WHERE proposal_id = ?", (proposal_id,))
+    await db.execute("UPDATE marriage_proposals SET status = 'accepted' WHERE proposal_id = ?", (proposal_id,))
 
-    database.commit()
-
+    
     # Логируем
     await log_economy(user_id=proposal_data["from_id"], target_id=proposal_data["to_id"], amount=None,
                       log=f"вступил в брак с пользователем {proposal_data['to_id']}")
@@ -4725,38 +4784,35 @@ async def accept_marriage_proposal(proposal_id: int, user_id: int) -> dict:
 
 async def reject_marriage_proposal(proposal_id: int, user_id: int) -> dict:
     """Отклонить предложение брака"""
-    sql.execute("SELECT * FROM marriage_proposals WHERE proposal_id = ? AND status = 'pending'", (proposal_id,))
-    proposal = sql.fetchone()
+    await db.execute("SELECT * FROM marriage_proposals WHERE proposal_id = ? AND status = 'pending'", (proposal_id,))
+    proposal = await db.fetchone()
 
     if not proposal:
         return {"success": False, "message": "Предложение не найдено!"}
 
-    columns = [description[0] for description in sql.description]
-    proposal_data = dict(zip(columns, proposal))
+    proposal_data = dict(proposal)
 
     # Проверяем права
     if proposal_data["to_id"] != user_id and proposal_data["from_id"] != user_id:
         return {"success": False, "message": "Это не ваше предложение!"}
 
-    sql.execute("UPDATE marriage_proposals SET status = 'rejected' WHERE proposal_id = ?", (proposal_id,))
-    database.commit()
-
+    await db.execute("UPDATE marriage_proposals SET status = 'rejected' WHERE proposal_id = ?", (proposal_id,))
+    
     return {"success": True, "message": "Предложение отклонено!"}
 
 
 async def get_user_marriage(user_id: int) -> dict:
     """Получить информацию о браке пользователя"""
-    sql.execute("""
+    await db.execute("""
         SELECT * FROM marriages 
         WHERE (user1_id = ? OR user2_id = ?) AND status = 'accepted'
     """, (user_id, user_id))
 
-    marriage = sql.fetchone()
+    marriage = await db.fetchone()
     if not marriage:
         return None
 
-    columns = [description[0] for description in sql.description]
-    marriage_data = dict(zip(columns, marriage))
+    marriage_data = dict(marriage)
 
     # Определяем супруга
     if marriage_data["user1_id"] == user_id:
@@ -4766,6 +4822,7 @@ async def get_user_marriage(user_id: int) -> dict:
 
     marriage_data["spouse_id"] = spouse_id
     marriage_data["spouse_name"] = await get_user_or_group_name(spouse_id)
+    marriage_data["marriage_date"] = marriage_data.get("marriage_date", None)
 
     return marriage_data
 
@@ -4796,14 +4853,13 @@ async def divorce(user_id: int, confirm: bool = False) -> dict:
 
     current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    sql.execute("""
+    await db.execute("""
         UPDATE marriages 
         SET status = 'divorced', divorce_date = ? 
         WHERE marriage_id = ?
     """, (current_time, marriage["marriage_id"]))
 
-    database.commit()
-
+    
     await log_economy(user_id=user_id, target_id=marriage["spouse_id"], amount=None,
                       log=f"развёлся с пользователем {marriage['spouse_id']}")
 
@@ -4815,21 +4871,21 @@ async def divorce(user_id: int, confirm: bool = False) -> dict:
 
 async def get_marriage_stats() -> str:
     """Получить статистику браков"""
-    sql.execute("SELECT COUNT(*) FROM marriages WHERE status = 'accepted'")
-    active_marriages = sql.fetchone()[0]
+    await db.execute("SELECT COUNT(*) FROM marriages WHERE status = 'accepted'")
+    active_marriages = await db.fetchone()[0]
 
-    sql.execute("SELECT COUNT(*) FROM marriages WHERE status = 'divorced'")
-    divorced = sql.fetchone()[0]
+    await db.execute("SELECT COUNT(*) FROM marriages WHERE status = 'divorced'")
+    divorced = await db.fetchone()[0]
 
     # Самый долгий брак
-    sql.execute("""
+    await db.execute("""
         SELECT user1_id, user2_id, marriage_date, 
                julianday('now') - julianday(marriage_date) as days
         FROM marriages 
         WHERE status = 'accepted' 
         ORDER BY days DESC LIMIT 1
     """)
-    longest = sql.fetchone()
+    longest = await db.fetchone()
 
     text = f"📊 СТАТИСТИКА БРАКОВ\n\n"
     text += f"💍 Активных браков: {active_marriages}\n"
@@ -4856,7 +4912,7 @@ async def add_missing_businesses():
     for biz in missing_businesses:
         try:
             # Вставляем с проверкой на дубликат
-            sql.execute("""
+            await db.execute("""
                 INSERT OR REPLACE INTO business_types 
                 (biz_id, name, emoji, price, min_profit, max_profit, description) 
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -4865,8 +4921,7 @@ async def add_missing_businesses():
         except Exception as e:
             print(f"Ошибка при добавлении бизнеса {biz[1]}: {e}")
 
-    database.commit()
-    print("Все бизнесы добавлены!")
+        print("Все бизнесы добавлены!")
 
 
 # Запустите эту функцию один раз
@@ -4887,21 +4942,24 @@ async def on_chat_message(message: Message):
     if hasattr(ctx, 'last_messages'):
         if cache_key in ctx.last_messages:
             if current_time - ctx.last_messages[cache_key] < 2.0:
-                return
+                return True
     else:
         ctx.last_messages = {}
     ctx.last_messages[cache_key] = current_time
-    for key in list(ctx.last_messages.keys()):
-        if current_time - ctx.last_messages[key] > 10.0:
-            del ctx.last_messages[key]
+    # ОПТИМИЗАЦИЯ: очистка старых записей только каждые 100 сообщений
+    if not hasattr(ctx, '_rate_cleanup_counter'):
+        ctx._rate_cleanup_counter = 0
+    ctx._rate_cleanup_counter += 1
+    if ctx._rate_cleanup_counter >= 100:
+        ctx._rate_cleanup_counter = 0
+        for key in list(ctx.last_messages.keys()):
+            if current_time - ctx.last_messages[key] > 10.0:
+                del ctx.last_messages[key]
     arguments = message.text.split(' ')
     arguments_lower = message.text.lower().split(' ')
 
     global all_chat_title
     global chat_titles_string
-
-    # Получаем список админов для проверки прав
-    admin_list = await ruklist()
 
     try:
         command_identifier = arguments[0].strip()[0]
@@ -4916,19 +4974,19 @@ async def on_chat_message(message: Message):
         if command in ['startbot', 'включибот']:
             if user_id != 597064735:  # ИСПРАВЛЕНО: было 'await user_id == 597064735'
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
-                return
+                return True
             bot_enabled = True
             chat_mode = "global"
             enabled_chats.clear()
             await message.reply("Бот включен во всех чатах.", disable_mentions=1)
-            return
+            return True
         elif command in ['offbot', 'выключибот']:
             if user_id != 597064735:  # ИСПРАВЛЕНО: было 'await user_id == 597064735'
                 await message.reply("Недостаточно прав для этой команды.", disable_mentions=1)
-                return
+                return True
             bot_enabled = False
             await message.reply("Бот выключен во всех чатах.", disable_mentions=1)
-            return
+            return True
 
         if not bot_enabled and command not in ['startbot', 'включибот', 'offbot', 'выключибот']:
             return True
@@ -5035,7 +5093,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'создать':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5098,7 +5156,7 @@ async def on_chat_message(message: Message):
 
             return True
         if command in ['клан', 'clan'] and (len(arguments) == 1 or arguments_lower[1] == 'инфо'):
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5185,7 +5243,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'пригласить':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5242,7 +5300,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'поиск':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5269,20 +5327,20 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'принять':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
 
             # Получаем все приглашения пользователя
-            sql.execute("""
+            db.execute("""
                     SELECT ci.invite_id, ci.clan_id, ci.user_id, ci.inviter_id, ci.date, c.name, c.tag 
                     FROM clan_invites ci
                     JOIN clans c ON ci.clan_id = c.clan_id
                     WHERE ci.user_id = ?
                 """, (user_id,))
 
-            invites = sql.fetchall()
+            invites = await db.fetchall()
 
             if not invites:
                 await message.reply("❌ У вас нет активных приглашений в кланы!", disable_mentions=1)
@@ -5311,13 +5369,12 @@ async def on_chat_message(message: Message):
 
                         if result["success"]:
                             # Удаляем приглашение
-                            sql.execute("DELETE FROM clan_invites WHERE invite_id = ?", (invite_id,))
+                            db.execute("DELETE FROM clan_invites WHERE invite_id = ?", (invite_id,))
 
                             # Удаляем все остальные приглашения этого пользователя
-                            sql.execute("DELETE FROM clan_invites WHERE user_id = ?", (user_id,))
+                            db.execute("DELETE FROM clan_invites WHERE user_id = ?", (user_id,))
 
-                            database.commit()
-
+                            
                             await message.reply(f"✅ Вы вступили в клан '{clan_name}'!", disable_mentions=1)
                         else:
                             await message.reply(f"❌ {result['message']}", disable_mentions=1)
@@ -5350,7 +5407,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'кикнуть':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5402,7 +5459,7 @@ async def on_chat_message(message: Message):
 
             return True
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'покинуть':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5489,7 +5546,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'удалить':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5555,7 +5612,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'передать':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5610,7 +5667,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'заместитель':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5669,10 +5726,9 @@ async def on_chat_message(message: Message):
                     return True
 
                 # Назначаем заместителем
-                sql.execute("UPDATE clan_members SET role = 'deputy' WHERE user_id = ? AND clan_id = ?",
+                db.execute("UPDATE clan_members SET role = 'deputy' WHERE user_id = ? AND clan_id = ?",
                             (target_id, user_clan["clan_id"]))
-                database.commit()
-
+                
                 await message.reply(
                     f"✅ {await get_user_or_group_mention(target_id)} назначен заместителем лидера клана!\n\n"
                     f"Теперь он может:\n"
@@ -5724,10 +5780,9 @@ async def on_chat_message(message: Message):
                     return True
 
                 # Снимаем заместителя
-                sql.execute("UPDATE clan_members SET role = 'member' WHERE user_id = ? AND clan_id = ?",
+                db.execute("UPDATE clan_members SET role = 'member' WHERE user_id = ? AND clan_id = ?",
                             (target_id, user_clan["clan_id"]))
-                database.commit()
-
+                
                 await message.reply(
                     f"✅ {await get_user_or_group_mention(target_id)} снят с должности заместителя.",
                     disable_mentions=1)
@@ -5735,14 +5790,14 @@ async def on_chat_message(message: Message):
 
             elif subcommand == 'список':
                 # Получаем список заместителей
-                sql.execute("""
+                db.execute("""
                         SELECT user_id, joined_date, donated 
                         FROM clan_members 
                         WHERE clan_id = ? AND role = 'deputy'
                         ORDER BY joined_date
                     """, (user_clan["clan_id"],))
 
-                deputies = sql.fetchall()
+                deputies = await db.fetchall()
 
                 if not deputies:
                     await message.reply("📋 В клане пока нет заместителей.", disable_mentions=1)
@@ -5764,7 +5819,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'казна':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5778,9 +5833,19 @@ async def on_chat_message(message: Message):
             if len(arguments) < 3:
                 # Просто показываем казну
                 clan = await get_clan_by_id(user_clan["clan_id"])
+                bank = clan['bank']
+                try:
+                    bank = float(bank)
+                except (ValueError, TypeError):
+                    bank = 0
+                donated = user_clan['donated']
+                try:
+                    donated = float(donated)
+                except (ValueError, TypeError):
+                    donated = 0
                 await message.reply(
-                    f"💰 Казна клана '{clan['name']}': {clan['bank']:,}₽\n"
-                    f"💎 Ваш вклад: {user_clan['donated']:,}₽\n\n"
+                    f"💰 Казна клана '{clan['name']}': {bank:,}₽\n"
+                    f"💎 Ваш вклад: {donated:,}₽\n\n"
                     f"📥 Положить: /клан казна положить [сумма]\n"
                     f"📤 Снять: /клан казна снять [сумма] (только лидер/зам)",
                     disable_mentions=1
@@ -5833,7 +5898,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'топ':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5864,7 +5929,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'переименовать':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -5998,7 +6063,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'сменитьтег':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6075,7 +6140,7 @@ async def on_chat_message(message: Message):
 
         if command in ['setexp', 'выдатьнавык', 'setskill']:
             # Проверяем права (только из списка ruk)
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in admin_list:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("❌ Недостаточно прав! Команда доступна только Руководителю (9+)",
                                     disable_mentions=1)
@@ -6138,26 +6203,25 @@ async def on_chat_message(message: Message):
             target_name = await get_user_or_group_name(target_id)
 
             # Проверяем, есть ли у пользователя запись в jobs
-            sql.execute("SELECT skill FROM jobs WHERE user_id = ?", (target_id,))
-            job_data = sql.fetchone()
+            db.execute("SELECT skill FROM jobs WHERE user_id = ?", (target_id,))
+            job_data = await db.fetchone()
 
             if job_data:
                 # Обновляем существующий навык
                 current_skill = job_data[0]
                 new_skill = current_skill + amount
-                sql.execute("UPDATE jobs SET skill = ? WHERE user_id = ?", (new_skill, target_id))
+                db.execute("UPDATE jobs SET skill = ? WHERE user_id = ?", (new_skill, target_id))
             else:
                 # Создаём новую запись
                 new_skill = amount
                 current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                sql.execute("INSERT INTO jobs (user_id, skill, last_work_time) VALUES (?, ?, ?)",
+                db.execute("INSERT INTO jobs (user_id, skill, last_work_time) VALUES (?, ?, ?)",
                             (target_id, new_skill, current_time))
 
             # Также сохраняем в user_skills для бед
-            sql.execute("INSERT OR REPLACE INTO user_skills (user_id, skill) VALUES (?, ?)", (target_id, new_skill))
+            db.execute("INSERT OR REPLACE INTO user_skills (user_id, skill) VALUES (?, ?)", (target_id, new_skill))
 
-            database.commit()
-
+            
             # Логируем
             await log_economy(
                 user_id=user_id,
@@ -6191,7 +6255,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'война':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6251,23 +6315,23 @@ async def on_chat_message(message: Message):
                 clan_name = " ".join(clan_name_parts) if clan_name_parts else target_input
 
                 # Ищем клан по названию (без учёта регистра)
-                sql.execute("SELECT clan_id FROM clans WHERE LOWER(name) LIKE LOWER(?)", (f"%{clan_name}%",))
-                result = sql.fetchone()
+                db.execute("SELECT clan_id FROM clans WHERE LOWER(name) LIKE LOWER(?)", (f"%{clan_name}%",))
+                result = await db.fetchone()
 
                 if result:
                     target_clan = await get_clan_by_id(result[0])
                 else:
                     # Пробуем найти по тегу
-                    sql.execute("SELECT clan_id FROM clans WHERE LOWER(tag) LIKE LOWER(?)", (f"%{clan_name}%",))
-                    result = sql.fetchone()
+                    db.execute("SELECT clan_id FROM clans WHERE LOWER(tag) LIKE LOWER(?)", (f"%{clan_name}%",))
+                    result = await db.fetchone()
                     if result:
                         target_clan = await get_clan_by_id(result[0])
 
             if not target_clan:
                 # Показываем похожие кланы
-                sql.execute("SELECT clan_id, name, tag FROM clans WHERE name LIKE ? ORDER BY name LIMIT 5",
+                db.execute("SELECT clan_id, name, tag FROM clans WHERE name LIKE ? ORDER BY name LIMIT 5",
                             (f"%{target_input}%",))
-                similar = sql.fetchall()
+                similar = await db.fetchall()
 
                 if similar:
                     similar_list = []
@@ -6312,9 +6376,8 @@ async def on_chat_message(message: Message):
 
             if result["success"]:
                 # Блокируем средства в казне
-                sql.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (bet, user_clan["clan_id"]))
-                database.commit()
-
+                db.execute("UPDATE clans SET bank = bank - ? WHERE clan_id = ?", (bet, user_clan["clan_id"]))
+                
                 await message.reply(
                     f"⚔️ ВОЙНА ОБЪЯВЛЕНА! ⚔️\n\n"
                     f"🏰 {user_clan['name']} {user_clan.get('tag', '')} vs {target_clan['name']} {target_clan.get('tag', '')}\n"
@@ -6345,7 +6408,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'войны':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6357,7 +6420,7 @@ async def on_chat_message(message: Message):
                 return True
 
             # Получаем активные войны клана
-            sql.execute("""
+            db.execute("""
                     SELECT w.*, c1.name as clan1_name, c1.tag as clan1_tag, 
                            c2.name as clan2_name, c2.tag as clan2_tag
                     FROM clan_wars w
@@ -6367,7 +6430,7 @@ async def on_chat_message(message: Message):
                     ORDER BY w.start_time DESC
                 """, (user_clan["clan_id"], user_clan["clan_id"]))
 
-            wars = sql.fetchall()
+            wars = await db.fetchall()
 
             if not wars:
                 await message.reply("✅ У вашего клана нет активных войн.", disable_mentions=1)
@@ -6400,7 +6463,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'принятьвойну':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6445,7 +6508,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'вызвать':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6456,18 +6519,17 @@ async def on_chat_message(message: Message):
                 await message.reply("❌ Вы не состоите в клане!", disable_mentions=1)
                 return True
 
-            sql.execute("""
+            db.execute("""
                 SELECT * FROM clan_wars 
                 WHERE (clan1_id = ? OR clan2_id = ?) AND status = 'active'
             """, (user_clan["clan_id"], user_clan["clan_id"]))
 
-            war = sql.fetchone()
+            war = await db.fetchone()
             if not war:
                 await message.reply("❌ У вашего клана нет активной войны!", disable_mentions=1)
                 return True
 
-            columns = [description[0] for description in sql.description]
-            war_data = dict(zip(columns, war))
+            war_data = dict(war)
 
             # Определяем цель
             target_id = None
@@ -6513,9 +6575,8 @@ async def on_chat_message(message: Message):
             await setmoney(user_id, -bet)
 
             # Деньги поступают в казну КЛАНА ВЫЗЫВАЮЩЕГО (не в казну войны!)
-            sql.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (bet, user_clan["clan_id"]))
-            database.commit()
-
+            db.execute("UPDATE clans SET bank = bank + ? WHERE clan_id = ?", (bet, user_clan["clan_id"]))
+            
             # Создаём сражение
             result = await create_clan_battle(war_data["war_id"], user_id, target_id, bet)
 
@@ -6560,7 +6621,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['клан', 'clan'] and len(arguments) >= 2 and arguments_lower[1] == 'войнастат':
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6575,7 +6636,7 @@ async def on_chat_message(message: Message):
                 await message.reply("❌ Неверный ID войны!", disable_mentions=1)
                 return True
 
-            sql.execute("""
+            db.execute("""
                     SELECT w.*, c1.name as clan1_name, c1.tag as clan1_tag, c1.bank as clan1_bank,
                            c2.name as clan2_name, c2.tag as clan2_tag, c2.bank as clan2_bank
                     FROM clan_wars w
@@ -6584,14 +6645,14 @@ async def on_chat_message(message: Message):
                     WHERE w.war_id = ?
                 """, (war_id,))
 
-            war = sql.fetchone()
+            war = await db.fetchone()
             if not war:
                 await message.reply("❌ Война не найдена!", disable_mentions=1)
                 return True
 
             # Получаем все битвы в этой войне
-            sql.execute("SELECT * FROM clan_battles WHERE war_id = ? ORDER BY battle_id", (war_id,))
-            battles = sql.fetchall()
+            db.execute("SELECT * FROM clan_battles WHERE war_id = ? ORDER BY battle_id", (war_id,))
+            battles = await db.fetchall()
 
             war_id = war[0]
             clan1_name = war[10]
@@ -6644,7 +6705,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['job', 'jobs', 'вакансии', 'работы']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6718,20 +6779,19 @@ async def on_chat_message(message: Message):
                 current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
                 # Проверяем, есть ли уже запись в таблице jobs
-                sql.execute("SELECT * FROM jobs WHERE user_id = ?", (user_id,))
-                existing = sql.fetchone()
+                await db.execute("SELECT * FROM jobs WHERE user_id = ?", (user_id,))
+                existing = await db.fetchone()
 
                 if existing:
                     # Обновляем существующую запись
-                    sql.execute("UPDATE jobs SET job_id = ?, last_work_time = ? WHERE user_id = ?",
+                    await db.execute("UPDATE jobs SET job_id = ?, last_work_time = ? WHERE user_id = ?",
                                 (job_id, current_time, user_id))
                 else:
                     # Создаём новую запись
-                    sql.execute("INSERT INTO jobs (user_id, job_id, skill, last_work_time) VALUES (?, ?, ?, ?)",
+                    await db.execute("INSERT INTO jobs (user_id, job_id, skill, last_work_time) VALUES (?, ?, ?, ?)",
                                 (user_id, job_id, user_skill, current_time))
 
-                database.commit()
-
+                
                 await log_economy(user_id=user_id, target_id=None, amount=None,
                                   log=f"устроился на работу {job_data['name']}")
 
@@ -6755,14 +6815,14 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['работа', 'work', 'зарплата']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
 
             # Проверяем, есть ли у пользователя работа
-            sql.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
-            user_job = sql.fetchone()
+            await db.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (user_id,))
+            user_job = await db.fetchone()
 
             if not user_job or not user_job[0]:
                 await message.reply(
@@ -6798,13 +6858,12 @@ async def on_chat_message(message: Message):
             current_time = moscow_now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
             # Обновляем навык и время последней работы
-            sql.execute("UPDATE jobs SET skill = ?, last_work_time = ? WHERE user_id = ?",
+            db.execute("UPDATE jobs SET skill = ?, last_work_time = ? WHERE user_id = ?",
                         (new_skill, current_time, user_id))
 
             # Начисляем деньги
             await setmoney(user_id, salary)
-            database.commit()
-
+            
             await log_economy(
                 user_id=user_id,
                 target_id=None,
@@ -6826,7 +6885,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['бизнесы', 'businesses', 'бизнессписок']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6844,7 +6903,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['бизнес', 'mybusiness', 'моибизнесы']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6862,12 +6921,16 @@ async def on_chat_message(message: Message):
             text = f"🏬 БИЗНЕСЫ {await get_user_or_group_mention(user_id)}:\n\n"
 
             for biz in businesses:
-                # id, user_id, biz_id, purchase_date, last_collected, balance, name, emoji, min_profit, max_profit
-                biz_id = biz[2]
-                biz_name = biz[6] if len(biz) > 6 else "Неизвестный бизнес"
-                biz_emoji = biz[7] if len(biz) > 7 else "🏢"
-                balance = biz[5] if len(biz) > 5 else 0
-                last_collected = biz[4] if len(biz) > 4 else None
+                # Используем именованный доступ к полям Record
+                biz_id = biz['biz_id']
+                biz_name = biz['name']
+                biz_emoji = biz['emoji']
+                balance = biz['balance']
+                try:
+                    balance = float(balance)
+                except (ValueError, TypeError):
+                    balance = 0
+                last_collected = biz['last_collected']
 
                 if last_collected:
                     try:
@@ -6901,7 +6964,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['купбиз', 'buybusiness', 'купитьбизнес']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6935,7 +6998,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['продбиз', 'sellbusiness', 'продатьбизнес']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -6977,6 +7040,10 @@ async def on_chat_message(message: Message):
 
                 refund = int(business["price"] * 0.7)
                 balance = user_biz[5]
+                try:
+                    balance = float(balance)
+                except (ValueError, TypeError):
+                    balance = 0
 
                 await message.reply(
                     f"⚠️ ПРОДАЖА БИЗНЕСА\n\n"
@@ -6993,7 +7060,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['собратьбиз', 'collectbusiness', 'собратьприбыль']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -7058,7 +7125,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['снятьбиз', 'withdrawbusiness', 'снятьсбизнеса']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -7136,7 +7203,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['addwhiteruk']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in [574393629, 597064735]:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("Недостаточно прав!")
                 return True
@@ -7159,7 +7226,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['delwhiteruk']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in [574393629, 597064735]:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("Недостаточно прав!")
                 return True
@@ -7184,13 +7251,13 @@ async def on_chat_message(message: Message):
         if command in ['listwhiteruk']:
             if user_id not in [574393629, 597064735]:
                 return
-            i = await ruklist()
+            i = await cached_ruklist()
             await message.reply(f'{i}')
             return True
 
         # КОМАНДА /buyvip - ИСПРАВЛЕННАЯ ВЕРСИЯ
         if command in ['buyvip', 'купитьвип']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -7273,7 +7340,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['allpromo', 'promolist']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in admin_list:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -7305,7 +7372,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['newpromo', 'setpromo']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in [574393629, 597064735]:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -7325,7 +7392,7 @@ async def on_chat_message(message: Message):
 
         # ================== КОМАНДЫ БРАКОВ ==================
         if command in ['брак', 'marry', 'женитьба']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -7525,7 +7592,7 @@ async def on_chat_message(message: Message):
 
         # КОМАНДА РАЗВОД
         if command in ['развод', 'divorce', 'развестись']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -7546,7 +7613,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['delpromo']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in [574393629, 597064735]:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
@@ -7584,7 +7651,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['вьебать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7613,7 +7680,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['выебать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7642,7 +7709,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['обоссать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7671,7 +7738,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['отлизать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7700,7 +7767,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['отсосать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7729,7 +7796,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['обнять']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7758,7 +7825,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['застрелить']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7787,7 +7854,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['пнуть']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7816,7 +7883,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['поцеловать', 'kiss']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7848,7 +7915,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['трахнуть']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7878,7 +7945,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['ударить']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7908,7 +7975,7 @@ async def on_chat_message(message: Message):
 
         # КОМАНДА /передать С УЧЕТОМ VIP СТАТУСА
         if command in ['передать', 'перевести', 'pay']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -7992,7 +8059,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['положить']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -8021,7 +8088,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['снять']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -8103,12 +8170,12 @@ async def on_chat_message(message: Message):
 
         # ================== КОМАНДА /balance ==================
         if command in ['balance', 'баланс', 'профиль', 'profile']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
 
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
 
             # Определяем, чей профиль смотрим
             target_id = user_id
@@ -8120,8 +8187,8 @@ async def on_chat_message(message: Message):
                 await message.reply("Нельзя получать баланс сообщества!")
                 return True
             if target_id != user_id:
-                sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (target_id,))
-                protected_role = sql.fetchone()
+                await db.execute("SELECT level FROM global_managers WHERE user_id = ?", (target_id,))
+                protected_role = await db.fetchone()
                 if protected_role and protected_role[0] >= 8:
                     await message.reply("⛔ Баланс пользователей на должности ЗР и выше скрыт.", disable_mentions=1)
                     return True
@@ -8144,8 +8211,8 @@ async def on_chat_message(message: Message):
             businesses_count = len(businesses)
 
             # Карьера
-            sql.execute("SELECT job_id, skill FROM jobs WHERE user_id = ?", (target_id,))
-            user_job = sql.fetchone()
+            await db.execute("SELECT job_id, skill FROM jobs WHERE user_id = ?", (target_id,))
+            user_job = await db.fetchone()
 
             if user_job and user_job[0]:
                 job_id = user_job[0]
@@ -8234,15 +8301,15 @@ async def on_chat_message(message: Message):
 
         if command in ['проверитьбиз', 'checkbiz']:
             # Проверяем таблицу business_types
-            sql.execute("SELECT * FROM business_types ORDER BY biz_id")
-            types = sql.fetchall()
+            await db.execute("SELECT * FROM business_types ORDER BY biz_id")
+            types = await db.fetchall()
             text = "📊 Бизнесы в таблице business_types:\n"
             for t in types:
                 text += f"ID: {t[0]}, {t[1]}, {t[2]}, {t[3]}₽\n"
 
             # Проверяем бизнесы пользователя
-            sql.execute("SELECT * FROM user_businesses WHERE user_id = ?", (user_id,))
-            user_biz = sql.fetchall()
+            await db.execute("SELECT * FROM user_businesses WHERE user_id = ?", (user_id,))
+            user_biz = await db.fetchall()
             text += f"\n📊 Ваши бизнесы (user_businesses):\n"
             if user_biz:
                 for ub in user_biz:
@@ -8254,7 +8321,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['пожертвовать']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -8277,11 +8344,10 @@ async def on_chat_message(message: Message):
 
         async def chats_log(user_id=None, target_id=None, role=None, log=None):
             try:
-                sql.execute(
+                await db.execute(
                     "INSERT INTO logchats (user_id, target_id, role, log) VALUES (?, ?, ?, ?)",
                     (user_id, target_id, role, log)
                 )
-                database.commit()
                 print(f"[CHATS LOG] {user_id} -> {target_id} | {role} | {log}")
             except Exception as e:
                 print(f"[CHATS LOG ERROR] {e}")
@@ -8298,8 +8364,8 @@ async def on_chat_message(message: Message):
                 target = await getID(arguments[1])
 
             if target:
-                sql.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999", (target,))
-                logs = sql.fetchall()
+                await db.execute("SELECT * FROM economy WHERE user_id = ? ORDER BY rowid DESC LIMIT 9999999999999", (target,))
+                logs = await db.fetchall()
 
                 if not logs:
                     await message.reply(f"У {await get_user_or_group_mention(target)} отсутствуют записи в логах экономики.", disable_mentions=1)
@@ -8353,8 +8419,8 @@ async def on_chat_message(message: Message):
                 return True
 
             else:
-                sql.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
-                logs = sql.fetchall()
+                await db.execute("SELECT * FROM economy ORDER BY rowid DESC LIMIT 9999999999999")
+                logs = await db.fetchall()
 
                 if not logs:
                     await message.reply(f"Логи экономики отсутствуют!", disable_mentions=1)
@@ -8408,7 +8474,7 @@ async def on_chat_message(message: Message):
                 return True
 
         if command in ['topblago', 'топблаго']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8421,23 +8487,27 @@ async def on_chat_message(message: Message):
 
         # КОМАНДА /bonus С УЧЕТОМ VIP СТАТУСА
         if command in ['bonus', 'бонус', 'приз']:
-            game = await getgame(chat_id)
-            print('j', game)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
 
-            last_bonus = await get_user_data(user_id)
-            print('1 last', last_bonus)
-
-            if last_bonus is not None and last_bonus != 0:
+            # Получаем дату последнего бонуса
+            await db.execute("SELECT last_bonus FROM users WHERE user_id = ?", (user_id,))
+            last_bonus_row = await db.fetchone()
+            
+            if last_bonus_row and last_bonus_row[0]:
                 try:
-                    lastdate = datetime.strptime(last_bonus, '%Y-%m-%d %H:%M:%S.%f')
-                    currentdate = moscow_now()
-                    last_bonus = currentdate - lastdate
-                    print('l', last_bonus)
-                    hours_passed = last_bonus.total_seconds() / 3600
-
+                    last_bonus_time = last_bonus_row[0]
+                    # Если это datetime объект
+                    if isinstance(last_bonus_time, datetime):
+                        last_bonus_dt = last_bonus_time
+                    else:
+                        last_bonus_dt = datetime.strptime(last_bonus_time, '%Y-%m-%d %H:%M:%S.%f')
+                    
+                    current_dt = moscow_now()
+                    hours_passed = (current_dt - last_bonus_dt).total_seconds() / 3600
+                    
                     if hours_passed < 10:
                         hours_left = 10 - hours_passed
                         hours = int(hours_left)
@@ -8445,24 +8515,25 @@ async def on_chat_message(message: Message):
                         await message.reply(f'⏰ До следующего бонуса осталось: {hours} ч {minutes} мин!')
                         return True
                 except Exception as e:
-                    print(f'Ошибка парсинга даты: {e}')
+                    print(f'Ошибка парсинга даты бонуса: {e}')
 
-            bonus_amount = 200000
+            # Рандомная сумма от 100к до 300к
+            bonus_amount = random.randint(100000, 300000)
             bonus_type = "ежедневный"
             await log_economy(user_id=user_id, target_id=None, amount=bonus_amount,
-                              log=f"получил(-а) приз на {bonus_amount}$")
+                              log=f"получил(-а) {bonus_type} приз на {bonus_amount}₽")
             await setmoney(user_id, bonus_amount)
             await update_last_bonus_time(user_id)
-            bonus_amount = f'{bonus_amount:,d}'.replace(',', '.')
+            bonus_amount_formatted = f'{bonus_amount:,}'.replace(',', '.')
 
             await message.reply(
-                f'🎁 Ваш {bonus_type} бонус составляет {bonus_amount}₽!\n'
+                f'🎁 Ваш {bonus_type} бонус: {bonus_amount_formatted}₽!\n'
                 f'⏰ Следующий бонус через 10 часов'
             )
             return True
 
         if command in ['top', 'топ']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8470,27 +8541,27 @@ async def on_chat_message(message: Message):
             await message.reply(top_10, disable_mentions=1)
 
         if command in ['gameon']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in admin_list:  # ИСПРАВЛЕНО: было 'is not excluded_user_ids'
                 await message.reply('Недостаточно прав', disable_mentions=1)
                 return True
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             await setgame(chat_id, 0)
             await message.reply('Вы включили игровые команды в беседе')
             return True
 
         if command in ['gameoff']:
-            admin_list = await ruklist()
+            admin_list = await cached_ruklist()
             if user_id not in admin_list:  # ИСПРАВЛЕНО: было 'is not excludeduser_ids'
                 await message.reply('Недостаточно прав', disable_mentions=1)
                 return True
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             await setgame(chat_id, 1)
             await message.reply('Вы выключили игровые команды в беседе')
             return True
 
         if command in ['казино', 'додеп', 'додэп']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -8503,7 +8574,7 @@ async def on_chat_message(message: Message):
             except (IndexError, ValueError):
                 await message.answer('🎰 Укажите корректную ставку!')
                 return True
-            balance = await get_balance(user_id)
+            balance = await cached_get_balance(user_id)
             if umoney < 1000:
                 await message.reply('Минимальная ставка составляет 1000₽')
                 return True
@@ -8569,7 +8640,7 @@ async def on_chat_message(message: Message):
 
         # КОМАНДА /дуэль УЖЕ ОБНОВЛЕНА В КОЛБЭКЕ
         if command in ['duel', 'дуэль']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             print('j', game)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
@@ -8642,7 +8713,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['инфобиз', 'businessinfo', 'инфобизнес']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8677,8 +8748,13 @@ async def on_chat_message(message: Message):
             text += f"💎 Окупаемость: ~{biz['price'] // biz['min_profit']} дней\n\n"
 
             if user_biz:
+                balance = user_biz[5]
+                try:
+                    balance = float(balance)
+                except (ValueError, TypeError):
+                    balance = 0
                 text += f"✅ У ВАС ЕСТЬ ЭТОТ БИЗНЕС\n"
-                text += f"💸 На счету: {user_biz[5]:,}₽\n"
+                text += f"💸 На счету: {balance:,}₽\n"
                 text += f"📅 Куплен: {user_biz[3][:10]}\n"
             else:
                 text += f"❌ У вас нет этого бизнеса\n"
@@ -8688,14 +8764,14 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['уволиться', 'leavejob', 'увольнение']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
 
             # Проверяем, есть ли у пользователя работа
-            sql.execute("SELECT job_id, skill FROM jobs WHERE user_id = ?", (user_id,))
-            current_job = sql.fetchone()
+            db.execute("SELECT job_id, skill FROM jobs WHERE user_id = ?", (user_id,))
+            current_job = await db.fetchone()
 
             if not current_job or not current_job[0]:
                 await message.reply("❌ Вы и так безработный! Устроиться можно через /job", disable_mentions=1)
@@ -8715,12 +8791,11 @@ async def on_chat_message(message: Message):
                 return True
 
             # Сохраняем навык перед увольнением
-            sql.execute("INSERT OR REPLACE INTO user_skills (user_id, skill) VALUES (?, ?)", (user_id, skill))
+            db.execute("INSERT OR REPLACE INTO user_skills (user_id, skill) VALUES (?, ?)", (user_id, skill))
 
             # Увольняем (удаляем только работу, но не навык)
-            sql.execute("UPDATE jobs SET job_id = NULL WHERE user_id = ?", (user_id,))
-            database.commit()
-
+            db.execute("UPDATE jobs SET job_id = NULL WHERE user_id = ?", (user_id,))
+            
             await log_economy(user_id=user_id, target_id=None, amount=None, log=f"уволился с работы {job_name}")
 
             await message.reply(
@@ -8737,7 +8812,7 @@ async def on_chat_message(message: Message):
 
         # ================== КОМАНДЫ ДЛЯ ДОМОВ ==================
         if command in ['дома', 'houses', 'списокдомов']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8758,7 +8833,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['купдом', 'buyhouse']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8783,7 +8858,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['проддом', 'sellhouse']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8812,8 +8887,8 @@ async def on_chat_message(message: Message):
                     return True
 
                 # Проверяем, есть ли у пользователя такой дом
-                sql.execute("SELECT * FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
-                if not sql.fetchone():
+                db.execute("SELECT * FROM houses WHERE user_id = ? AND house_id = ?", (user_id, house_id))
+                if not await db.fetchone():
                     await message.reply("❌ У вас нет такого дома!", disable_mentions=1)
                     return True
 
@@ -8834,7 +8909,7 @@ async def on_chat_message(message: Message):
 
         # ================== КОМАНДЫ ДЛЯ МАШИН ==================
         if command in ['машины', 'cars', 'списокмашин']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8855,7 +8930,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['купмашин', 'buycar']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8881,7 +8956,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['продмашин', 'sellcar']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -8911,8 +8986,8 @@ async def on_chat_message(message: Message):
                     return True
 
                 # Проверяем, есть ли у пользователя такая машина
-                sql.execute("SELECT * FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
-                if not sql.fetchone():
+                db.execute("SELECT * FROM cars WHERE user_id = ? AND car_id = ?", (user_id, car_id))
+                if not await db.fetchone():
                     await message.reply("❌ У вас нет такой машины!", disable_mentions=1)
                     return True
 
@@ -8933,7 +9008,7 @@ async def on_chat_message(message: Message):
 
         # ================== ПРОСМОТР ИМУЩЕСТВА ==================
         if command in ['имущ', 'property', 'имущество', 'моё']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -9006,15 +9081,15 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['whitelist', 'вайтлист']:
-            sql.execute("SELECT level FROM global_managers WHERE user_id = ?", (user_id,))
-            global_role = sql.fetchone()
+            db.execute("SELECT level FROM global_managers WHERE user_id = ?", (user_id,))
+            global_role = await db.fetchone()
             if user_id not in (574393629, 597064735) and (not global_role or global_role[0] < 9):
                 await message.reply("Недостаточно прав!", disable_mentions=1)
                 return True
             ensure_top_whitelist_table()
             if len(arguments) >= 2 and arguments_lower[1] in ['list', 'список']:
-                sql.execute("SELECT user_id FROM top_whitelist ORDER BY user_id")
-                rows = sql.fetchall()
+                db.execute("SELECT user_id FROM top_whitelist ORDER BY user_id")
+                rows = await db.fetchall()
                 text = "📋 Исключены из экономических топов:\n" + ("\n".join(f"• {await get_user_or_group_mention(row[0])}" for row in rows) if rows else "Список пуст")
                 await message.reply(text, disable_mentions=1)
                 return True
@@ -9028,12 +9103,11 @@ async def on_chat_message(message: Message):
                 return True
             remove = len(arguments) >= 3 and arguments_lower[1] in ['remove', 'del', 'удалить', 'вернуть']
             if remove:
-                sql.execute("DELETE FROM top_whitelist WHERE user_id = ?", (target_id,))
+                db.execute("DELETE FROM top_whitelist WHERE user_id = ?", (target_id,))
                 action_text = "возвращён в экономические топы"
             else:
-                sql.execute("INSERT OR IGNORE INTO top_whitelist (user_id) VALUES (?)", (target_id,))
+                db.execute("INSERT OR IGNORE INTO top_whitelist (user_id) VALUES (?)", (target_id,))
                 action_text = "исключён из экономических топов"
-            database.commit()
             await message.reply(f"✅ {await get_user_or_group_mention(target_id)} {action_text}.", disable_mentions=1)
             return True
 
@@ -9218,7 +9292,7 @@ async def on_chat_message(message: Message):
 
         # ================== ТОП ПО ИМУЩЕСТВУ ==================
         if command in ['топимущ', 'topwealth', 'топбогатых']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -9228,7 +9302,7 @@ async def on_chat_message(message: Message):
             return True
 
         if command in ['statsjob', 'профильработы', 'jobstats']:
-            game = await getgame(chat_id)
+            game = await cached_getgame(chat_id)
             if game != 0:
                 await message.reply('В данной беседе выключены игровые команды')
                 return True
@@ -9241,8 +9315,8 @@ async def on_chat_message(message: Message):
                 target_id = await getID(arguments[1])
 
             # Получаем данные о работе и навыке
-            sql.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (target_id,))
-            user_job = sql.fetchone()
+            await db.execute("SELECT job_id, skill, last_work_time FROM jobs WHERE user_id = ?", (target_id,))
+            user_job = await db.fetchone()
 
             # Получаем сохранённый навык из отдельной таблицы
             user_skill = await get_user_skill(target_id)
